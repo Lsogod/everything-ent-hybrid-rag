@@ -97,6 +97,9 @@ npm run dev
 - 会话消息：`GET /api/v1/chat/sessions/{session_id}/messages`（需要 `chat:read`）
 - 下载示例文档：`POST /api/v1/debug/sample-doc`（需要 `kb:index`）
 - 文件索引统计：`GET /api/v1/debug/file-stats?file_path=...`（需要 `chat:read`）
+- 评测数据集清单：`GET /api/v1/eval/datasets/manifest`（需要 `chat:read`）
+- 评测报表列表：`GET /api/v1/eval/reports?limit=20`（需要 `chat:read`）
+- 最新评测报表：`GET /api/v1/eval/reports/latest`（需要 `chat:read`）
 - RBAC 初始化：`POST /api/v1/admin/bootstrap`
 - 给用户分配角色：`POST /api/v1/admin/users/{user_id}/roles/{role_name}`（需要 `rbac:manage`）
 
@@ -136,6 +139,114 @@ npm run dev
   - `LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`
 
 模型与供应商配置仅在后端（`.env`）生效，不在前端暴露。
+
+## DuRetrieval（C-MTEB）公共基线评测
+
+用于离线评估检索能力，输出 `BM25 / Dense / Fusion(RRF)` 三路结果的
+`Hit@K / Recall@K / MRR@K / MAP@K / NDCG@K`。
+
+### 先将数据集落盘到项目目录
+
+会在 `data/knowledge/datasets/` 生成：
+
+- `duretrieval_c_mteb/corpus.md`
+- `duretrieval_mteb/corpus.md`
+- `duretrieval_manifest.json`（前端评测页读取）
+
+```bash
+python scripts/materialize_duretrieval_knowledge.py --max-corpus 1200 --max-queries 240
+```
+
+1. 安装评测依赖：
+
+```bash
+pip install -r eval/requirements.txt
+```
+
+2. 跑 BM25 基线（推荐先跑这个）：
+
+```bash
+python eval/run_duretrieval_baseline.py --method bm25 --top-k 10 --ks 1,3,5,10
+```
+
+3. 跑 Dense 基线（默认 `BAAI/bge-base-zh-v1.5`）：
+
+```bash
+python eval/run_duretrieval_baseline.py --method dense --device cuda --batch-size 64 --top-k 10 --ks 1,3,5,10
+```
+
+4. 同时跑两种基线并生成报告（自动包含 `fusion`）：
+
+```bash
+python eval/run_duretrieval_baseline.py --method both --top-k 10 --ks 1,3,5,10 --output-dir eval/reports
+```
+
+5. 指定 RRF 融合参数（可用于调参）：
+
+```bash
+python eval/run_duretrieval_baseline.py --method both --rrf-k 60 --rrf-bm25-weight 1.0 --rrf-dense-weight 1.0 --output-dir eval/reports
+```
+
+常用参数：
+
+- `--dataset-source auto|c-mteb|mteb`：数据源优先级（默认 `auto`）
+- `--max-corpus`、`--max-queries`：快速 smoke test 子集
+- `--tokenizer jieba|whitespace`：BM25 分词策略
+- `--rrf-k`：RRF 融合常数（默认 `60`）
+- `--rrf-bm25-weight`、`--rrf-dense-weight`：两路召回的融合权重（默认都为 `1.0`）
+
+结果文件会输出到 `eval/reports/duretrieval_baseline_*.json`，可直接用于版本前后 A/B 对比。
+当 `--method both` 时，报告中会包含：
+
+- `results.bm25`
+- `results.dense`
+- `results.fusion`（RRF 融合）
+
+### 在 Docker 中运行评测
+
+默认 compose 已新增 `eval` 服务（`profile: eval`），不会影响日常 `api/worker` 启动。
+
+1. 构建评测镜像：
+
+```bash
+docker compose --profile eval build eval
+```
+
+2. 运行 BM25 基线：
+
+```bash
+docker compose --profile eval run --rm eval
+```
+
+3. 在 Docker 中落盘 DuRetrieval 数据集：
+
+```bash
+docker compose --profile eval run --rm eval python scripts/materialize_duretrieval_knowledge.py --max-corpus 1200 --max-queries 240
+```
+
+4. 运行 Dense 基线：
+
+```bash
+docker compose --profile eval run --rm eval python eval/run_duretrieval_baseline.py --method dense --device cuda --batch-size 64 --top-k 10 --ks 1,3,5,10
+```
+
+5. 运行 BM25 + Dense + Fusion（RRF）完整基线：
+
+```bash
+docker compose --profile eval run --rm eval python eval/run_duretrieval_baseline.py --method both --top-k 10 --ks 1,3,5,10 --rrf-k 60 --rrf-bm25-weight 1.0 --rrf-dense-weight 1.0 --output-dir eval/reports
+```
+
+### 前端评测页
+
+前端新增了 `DuRetrieval 评测` 页签，直接基于以下本地语料问答：
+
+- `/data/knowledge/datasets/duretrieval_c_mteb/corpus.md`
+- `/data/knowledge/datasets/duretrieval_mteb/corpus.md`
+
+页面会调用 `GET /api/v1/eval/datasets/manifest` 同步数据集状态（文件存在、已入库 chunk 数）并可一键跑通索引+问答流程。
+
+同时会调用 `GET /api/v1/eval/reports` 拉取离线基线报表，展示最新一份
+`bm25 / dense / fusion` 对比表（`Hit@K / Recall@K / MRR@K / MAP@K / NDCG@K`）与历史报表列表。
 
 ## 备注
 
