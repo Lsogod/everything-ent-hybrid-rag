@@ -175,6 +175,18 @@ python eval/run_duretrieval_baseline.py --method bm25 --top-k 10 --ks 1,3,5,10
 python eval/run_duretrieval_baseline.py --method dense --device cuda --batch-size 64 --top-k 10 --ks 1,3,5,10
 ```
 
+3.1 使用在线 OpenAI-compatible Embedding（读取 `.env`）：
+
+```bash
+python eval/run_duretrieval_baseline.py --method dense --dense-backend openai_compatible --top-k 10 --ks 1,3,5,10
+```
+
+可选覆盖参数（不走默认 `.env`）：
+
+```bash
+python eval/run_duretrieval_baseline.py --method dense --dense-backend openai_compatible --dense-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 --dense-model text-embedding-v4 --dense-api-key $DASHSCOPE_API_KEY --dense-expected-dim 1024 --dense-use-dimensions true
+```
+
 4. 同时跑两种基线并生成报告（自动包含 `fusion`）：
 
 ```bash
@@ -187,13 +199,27 @@ python eval/run_duretrieval_baseline.py --method both --top-k 10 --ks 1,3,5,10 -
 python eval/run_duretrieval_baseline.py --method both --rrf-k 60 --rrf-bm25-weight 1.0 --rrf-dense-weight 1.0 --output-dir eval/reports
 ```
 
+6. 运行严格 chunk 评测（检索与评估都以 chunk 为单位）：
+
+```bash
+python eval/run_duretrieval_baseline.py --method both --eval-granularity chunk --chunk-size 500 --chunk-overlap 50 --chunk-gold-strategy best --chunk-gold-per-doc 1 --top-k 10 --ks 1,3,5,10 --output-dir eval/reports
+```
+
 常用参数：
 
 - `--dataset-source auto|c-mteb|mteb`：数据源优先级（默认 `auto`）
 - `--max-corpus`、`--max-queries`：快速 smoke test 子集
 - `--tokenizer jieba|whitespace`：BM25 分词策略
+- `--dense-backend sentence_transformers|openai_compatible`：Dense 召回后端（默认本地模型）
+- `--dense-model`：Dense 模型名（`openai_compatible` 模式会优先读 `.env` 中 EMBEDDING_MODEL_*）
+- `--dense-base-url`、`--dense-api-key`：OpenAI-compatible embedding 地址和密钥
+- `--dense-expected-dim`、`--dense-use-dimensions`：在线 embedding 维度控制
 - `--rrf-k`：RRF 融合常数（默认 `60`）
 - `--rrf-bm25-weight`、`--rrf-dense-weight`：两路召回的融合权重（默认都为 `1.0`）
+- `--eval-granularity doc|chunk`：评测粒度（默认 `doc`）
+- `--chunk-size`、`--chunk-overlap`：chunk 切分参数（与在线索引建议保持一致）
+- `--chunk-gold-strategy best|all`：chunk 金标准投影策略
+- `--chunk-gold-per-doc`：`best` 策略下每个相关 doc 选取的 gold chunk 数
 
 结果文件会输出到 `eval/reports/duretrieval_baseline_*.json`，可直接用于版本前后 A/B 对比。
 当 `--method both` 时，报告中会包含：
@@ -201,6 +227,8 @@ python eval/run_duretrieval_baseline.py --method both --rrf-k 60 --rrf-bm25-weig
 - `results.bm25`
 - `results.dense`
 - `results.fusion`（RRF 融合）
+
+当 `--eval-granularity chunk` 时，报告还会包含 `chunk_eval` 字段，记录 chunk 总量、gold 投影参数与 qrels 规模。
 
 ### 在 Docker 中运行评测
 
@@ -253,3 +281,47 @@ docker compose --profile eval run --rm eval python eval/run_duretrieval_baseline
 - Elasticsearch 索引会在 API/Worker 启动时自动创建。
 - 数据库表会在 API 启动时自动创建。
 - 当 `LLM_API_KEY` 为空时，问答接口仍可工作（退化为仅上下文回答模式）。
+
+## DuRetrieval 数据集数量说明（重要）
+
+在本项目的离线检索评测里，`query 数量` 与 `corpus 数量` 是两个不同维度：
+
+- `queries`：要评测的问题条数（例如先跑 100 条 query）。
+- `corpus`：被检索的候选文档总数（例如 100001 篇文档）。
+- `qrels_queries`：有标注真值的 query 数量。
+- `qrels_pairs`：`query -> relevant_doc_id` 标注对数量。
+
+为什么“只跑 100 query”仍常用全量 corpus：
+
+- 检索评测本质是“从完整候选池里排序”。
+- 如果只截取小语料，负样本变少，排序更容易，`Hit@K / Recall@K / MRR@K / MAP@K / NDCG@K` 往往会偏高。
+- 为了可比性（与历史版本、与公共基线），建议固定同一份 corpus。
+
+可用以下参数控制规模（用于 smoke test）：
+
+```bash
+python scripts/materialize_duretrieval_knowledge.py --max-corpus 1200 --max-queries 240
+python eval/run_duretrieval_baseline.py --method both --max-corpus 1200 --max-queries 240 --top-k 10 --ks 1,3,5,10
+```
+
+建议在报表中同时记录：`corpus / queries / qrels_queries / qrels_pairs`，避免只看 query 数造成误读。
+
+## 检索评测指标含义
+
+以下指标都基于同一份 qrels（金标准）计算：
+
+- `Hit@K`：Top-K 中是否命中至少 1 个相关文档。
+- `Recall@K`：Top-K 覆盖了多少相关文档。
+- `MRR@K`：第一个相关文档出现得越靠前，分数越高。
+- `MAP@K`：综合考虑多个相关文档在 Top-K 内的整体排序质量。
+- `NDCG@K`：考虑位置折损后的排序质量（越靠前权重越高）。
+- `cost(s)`：该检索方法在本次评测中的耗时（秒）。
+
+常见解读：
+
+- 看“是否命中”：优先看 `Hit@K`。
+- 看“覆盖是否全”：优先看 `Recall@K`。
+- 看“排序是否靠前”：优先看 `MRR@K / MAP@K / NDCG@K`。
+- 看“效果-成本权衡”：结合 `cost(s)` 一起判断。
+
+当前项目默认是 `doc 级评测`；如切换到 `chunk 级评测`，指标会更严格，数值通常会下降，且需保证切分策略与金标准投影策略一致。

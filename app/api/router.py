@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,6 +26,8 @@ router = APIRouter(dependencies=[Depends(verify_api_key)])
 settings = get_settings()
 SAMPLE_DOC_URL = "https://raw.githubusercontent.com/fastapi/fastapi/master/README.md"
 SAMPLE_DOC_NAME = "fastapi_official_readme.md"
+DATASET_MANIFEST = "datasets/duretrieval_manifest.json"
+REPORTS_DIR = Path(__file__).resolve().parents[2] / "eval" / "reports"
 
 
 @router.post("/index/file", response_model=TaskResponse)
@@ -268,4 +271,157 @@ async def file_stats(
         "file_path": resolved,
         "chunk_count": count,
         "indexed": count > 0,
+    }
+
+
+@router.get("/eval/datasets/manifest")
+async def eval_dataset_manifest(
+    _: str = Depends(require_permission("chat:read")),
+) -> dict:
+    manifest_path = Path(settings.knowledge_root).resolve() / DATASET_MANIFEST
+    if not manifest_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "dataset manifest not found",
+                "hint": "run: python scripts/materialize_duretrieval_knowledge.py",
+                "path": str(manifest_path),
+            },
+        )
+
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail=f"invalid dataset manifest: {exc}") from exc
+
+    store = ElasticsearchStore()
+    items: list[dict] = []
+    for item in raw.get("items", []):
+        runtime_path = str(item.get("corpus_file_path_runtime", "")).strip()
+        if runtime_path:
+            resolved_runtime_path = str(Path(runtime_path).resolve())
+        else:
+            resolved_runtime_path = ""
+
+        try:
+            chunk_count = store.count_by_file(resolved_runtime_path) if resolved_runtime_path else 0
+        except Exception:  # noqa: BLE001
+            chunk_count = 0
+        items.append(
+            {
+                **item,
+                "corpus_file_path_runtime": runtime_path,
+                "resolved_file_path": resolved_runtime_path,
+                "chunk_count": chunk_count,
+                "indexed": chunk_count > 0,
+                "exists": bool(resolved_runtime_path and Path(resolved_runtime_path).exists()),
+            }
+        )
+
+    return {
+        "generated_at": raw.get("generated_at"),
+        "manifest_path": str(manifest_path),
+        "items": items,
+    }
+
+
+def _read_report(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _report_summary(path: Path, payload: dict) -> dict:
+    results = payload.get("results") or {}
+    method_metrics = {
+        method: (details.get("metrics") or {})
+        for method, details in results.items()
+        if isinstance(details, dict)
+    }
+    method_cost = {
+        method: details.get("cost_seconds")
+        for method, details in results.items()
+        if isinstance(details, dict)
+    }
+    stat = path.stat()
+    return {
+        "file_name": path.name,
+        "file_path": str(path),
+        "size_bytes": stat.st_size,
+        "mtime": stat.st_mtime,
+        "created_at": payload.get("created_at"),
+        "dataset": payload.get("dataset"),
+        "method": payload.get("method"),
+        "ks": payload.get("ks") or [],
+        "top_k": payload.get("top_k"),
+        "counts": payload.get("counts") or {},
+        "cost_seconds_total": payload.get("cost_seconds_total"),
+        "metrics": method_metrics,
+        "method_cost_seconds": method_cost,
+    }
+
+
+@router.get("/eval/reports")
+async def eval_reports(
+    limit: int = Query(default=20, ge=1, le=200),
+    _: str = Depends(require_permission("chat:read")),
+) -> dict:
+    report_dir = REPORTS_DIR
+    if not report_dir.exists():
+        return {
+            "report_dir": str(report_dir),
+            "count": 0,
+            "latest": None,
+            "items": [],
+        }
+
+    report_files = sorted(
+        report_dir.glob("duretrieval_baseline_*.json"),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+
+    summaries: list[dict] = []
+    for path in report_files[:limit]:
+        payload = _read_report(path)
+        if not payload:
+            continue
+        summaries.append(_report_summary(path, payload))
+
+    return {
+        "report_dir": str(report_dir),
+        "count": len(summaries),
+        "latest": summaries[0] if summaries else None,
+        "items": summaries,
+    }
+
+
+@router.get("/eval/reports/latest")
+async def eval_latest_report(
+    _: str = Depends(require_permission("chat:read")),
+) -> dict:
+    report_dir = REPORTS_DIR
+    if not report_dir.exists():
+        return {"report_dir": str(report_dir), "latest": None}
+
+    report_files = sorted(
+        report_dir.glob("duretrieval_baseline_*.json"),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    if not report_files:
+        return {"report_dir": str(report_dir), "latest": None}
+
+    path = report_files[0]
+    payload = _read_report(path)
+    if not payload:
+        return {"report_dir": str(report_dir), "latest": None}
+
+    return {
+        "report_dir": str(report_dir),
+        "latest": {
+            "summary": _report_summary(path, payload),
+            "report": payload,
+        },
     }

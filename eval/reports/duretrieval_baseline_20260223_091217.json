@@ -1,0 +1,76 @@
+{
+  "dataset": "C-MTEB/DuRetrieval",
+  "method": "both",
+  "dense_model": "BAAI/bge-base-zh-v1.5",
+  "top_k": 10,
+  "ks": [
+    1,
+    3,
+    5,
+    10
+  ],
+  "counts": {
+    "corpus": 2000,
+    "queries": 200,
+    "qrels_queries": 200,
+    "qrels_pairs": 889
+  },
+  "results": {
+    "bm25": {
+      "metrics": {
+        "hit@1": 0.885,
+        "recall@1": 0.285693,
+        "mrr@1": 0.885,
+        "map@1": 0.885,
+        "ndcg@1": 0.885,
+        "hit@3": 0.91,
+        "recall@3": 0.575685,
+        "mrr@3": 0.896667,
+        "map@3": 0.784583,
+        "ndcg@3": 0.81722,
+        "hit@5": 0.92,
+        "recall@5": 0.697347,
+        "mrr@5": 0.898917,
+        "map@5": 0.748158,
+        "ndcg@5": 0.796909,
+        "hit@10": 0.925,
+        "recall@10": 0.795751,
+        "mrr@10": 0.899631,
+        "map@10": 0.747829,
+        "ndcg@10": 0.80727
+      },
+      "cost_seconds": 2.555,
+      "tokenizer": "jieba"
+    },
+    "dense": {
+      "metrics": {
+        "hit@1": 0.98,
+        "recall@1": 0.348907,
+        "mrr@1": 0.98,
+        "map@1": 0.98,
+        "ndcg@1": 0.98,
+        "hit@3": 0.995,
+        "recall@3": 0.739554,
+        "mrr@3": 0.9875,
+        "map@3": 0.976944,
+        "ndcg@3": 0.981924,
+        "hit@5": 0.995,
+        "recall@5": 0.895451,
+        "mrr@5": 0.9875,
+        "map@5": 0.977383,
+        "ndcg@5": 0.982707,
+        "hit@10": 0.995,
+        "recall@10": 0.96732,
+        "mrr@10": 0.9875,
+        "map@10": 0.972788,
+        "ndcg@10": 0.980706
+      },
+      "cost_seconds": 404.843,
+      "model": "BAAI/bge-base-zh-v1.5",
+      "batch_size": 64,
+      "device": null
+    }
+  },
+  "cost_seconds_total": 439.561,
+  "created_at": "2026-02-23T09:12:17.881340Z"
+}

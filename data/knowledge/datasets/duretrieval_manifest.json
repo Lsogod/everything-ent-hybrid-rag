@@ -1,0 +1,54 @@
+{
+  "generated_at": "2026-02-23T13:40:30.192123Z",
+  "output_root": "/app/data/knowledge/datasets",
+  "items": [
+    {
+      "id": "duretrieval_c_mteb",
+      "title": "DuRetrieval (C-MTEB/DuRetrieval)",
+      "source": "C-MTEB/DuRetrieval",
+      "generated_at": "2026-02-23T13:39:57.051880Z",
+      "corpus_count": 100001,
+      "query_count": 2000,
+      "qrels_count": 9839,
+      "corpus_file_path_local": "/app/data/knowledge/datasets/duretrieval_c_mteb/corpus.md",
+      "corpus_file_path_runtime": "/data/knowledge/datasets/duretrieval_c_mteb/corpus.md",
+      "queries_file_path_local": "/app/data/knowledge/datasets/duretrieval_c_mteb/queries.json",
+      "sample_questions": [
+        "国家法定节假日共多少天",
+        "如何查看好友申请",
+        "哪个网站有湖南卫视直播",
+        "功和功率的区别",
+        "徐州旅行社哪家好",
+        "为什么要平衡摩擦力",
+        "覆铜面板是什么",
+        "怎么屏蔽qq新闻弹窗",
+        "我国古代第一个有伟大成就的爱国诗人是( )",
+        "宝鸡装修房子多钱"
+      ]
+    },
+    {
+      "id": "duretrieval_mteb",
+      "title": "DuRetrieval (mteb/DuRetrieval)",
+      "source": "mteb/DuRetrieval",
+      "generated_at": "2026-02-23T13:40:30.153542Z",
+      "corpus_count": 100001,
+      "query_count": 2000,
+      "qrels_count": 9839,
+      "corpus_file_path_local": "/app/data/knowledge/datasets/duretrieval_mteb/corpus.md",
+      "corpus_file_path_runtime": "/data/knowledge/datasets/duretrieval_mteb/corpus.md",
+      "queries_file_path_local": "/app/data/knowledge/datasets/duretrieval_mteb/queries.json",
+      "sample_questions": [
+        "国家法定节假日共多少天",
+        "如何查看好友申请",
+        "哪个网站有湖南卫视直播",
+        "功和功率的区别",
+        "徐州旅行社哪家好",
+        "为什么要平衡摩擦力",
+        "覆铜面板是什么",
+        "怎么屏蔽qq新闻弹窗",
+        "我国古代第一个有伟大成就的爱国诗人是( )",
+        "宝鸡装修房子多钱"
+      ]
+    }
+  ]
+}

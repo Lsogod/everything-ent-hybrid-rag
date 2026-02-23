@@ -84,5 +84,24 @@ services:
     depends_on:
       - api
 
+  eval:
+    build:
+      context: .
+      dockerfile: eval/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.10-slim}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
+    container_name: ent_eval
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+    command: python eval/run_duretrieval_baseline.py --method bm25 --top-k 10 --ks 1,3,5,10
+    volumes:
+      - ./:/app
+    profiles:
+      - eval
+
 volumes:
   es_data:

@@ -138,8 +138,9 @@ class HybridRetriever:
 
     @staticmethod
     def _serialize_hit(item: dict[str, Any]) -> dict[str, Any]:
-        content = (item.get("content") or "").replace("\n", " ").strip()
-        preview = content[:180]
+        raw_content = str(item.get("content") or "")
+        normalized = raw_content.replace("\n", " ").strip()
+        preview = normalized[:180]
         return {
             "id": item.get("_id"),
             "rank": item.get("_rank"),
@@ -149,6 +150,7 @@ class HybridRetriever:
             "file_path": item.get("file_path"),
             "chunk_id": item.get("chunk_id"),
             "preview": preview,
+            "content": raw_content,
         }
 
     @staticmethod

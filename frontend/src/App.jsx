@@ -1,9 +1,34 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import './App.css';
 
 const DEFAULT_USER_ID = import.meta.env.VITE_USER_ID || 'admin';
 const DEFAULT_API_KEY = import.meta.env.VITE_API_KEY || '';
-const DOC_LIBRARY = [
+const DURETRIEVAL_DOCS = [
+  {
+    id: 'duretrieval_c_mteb',
+    title: 'DuRetrieval (C-MTEB) snapshot',
+    filePath: '/data/knowledge/datasets/duretrieval_c_mteb/corpus.md',
+    prepare: 'local',
+    examples: [
+      '国家法定节假日共多少天',
+      '功和功率的区别',
+      '我国古代第一个有伟大成就的爱国诗人是( )',
+    ],
+  },
+  {
+    id: 'duretrieval_mteb',
+    title: 'DuRetrieval (mteb) snapshot',
+    filePath: '/data/knowledge/datasets/duretrieval_mteb/corpus.md',
+    prepare: 'local',
+    examples: [
+      '如何查看好友申请',
+      '怎么屏蔽QQ新闻弹窗',
+      '宝鸡装修房子多少钱',
+    ],
+  },
+];
+
+const DEMO_DOC_LIBRARY = [
   {
     id: 'fastapi_en',
     title: 'FastAPI 官方 README（英文）',
@@ -74,9 +99,12 @@ const DOC_LIBRARY = [
       'How does Python describe its programming paradigm?',
     ],
   },
+  ...DURETRIEVAL_DOCS,
 ];
 
-const DEFAULT_DOC = DOC_LIBRARY[0];
+const EVAL_DOC_LIBRARY = DURETRIEVAL_DOCS;
+
+const DEFAULT_DOC = DEMO_DOC_LIBRARY[0];
 const DEFAULT_QUESTION = DEFAULT_DOC.examples[0];
 
 function createSteps(query, filePath, docTitle) {
@@ -87,7 +115,7 @@ function createSteps(query, filePath, docTitle) {
       status: 'idle',
       input: {
         mode: 'local_or_remote',
-        endpoint: '/api/v1/debug/sample-doc (仅远程样例文档)',
+        endpoint: '/api/v1/debug/sample-doc（仅远程样例文档）',
         doc: docTitle,
         file_path: filePath,
       },
@@ -95,9 +123,9 @@ function createSteps(query, filePath, docTitle) {
       error: '',
       durationMs: 0,
       explain: {
-        what: '确保本次测试使用的文档可被后续索引与检索读取。',
-        choose: '远程样例文档会先下载；你选择的本地文档则直接使用现有文件。',
-        done: '返回有效 file_path，后续步骤都基于这个路径执行。',
+        what: 'Ensure the selected test document is ready for indexing and retrieval.',
+        choose: 'Remote sample files are downloaded first; local files are used directly.',
+        done: 'A valid file_path is returned for subsequent steps.',
       },
     },
     {
@@ -113,9 +141,9 @@ function createSteps(query, filePath, docTitle) {
       error: '',
       durationMs: 0,
       explain: {
-        what: '把文档送入异步索引队列，触发解析、切分、向量化与写入 ES。',
-        choose: '只索引当前选中的文档路径，不会一次索引全部知识库。',
-        done: '返回 task_id，表示任务已进入队列等待 worker 执行。',
+        what: 'Submit selected document to async indexing queue.',
+        choose: 'Only index the selected file, not the whole knowledge base.',
+        done: 'Receive task_id, then wait for worker processing.',
       },
     },
     {
@@ -131,9 +159,9 @@ function createSteps(query, filePath, docTitle) {
       error: '',
       durationMs: 0,
       explain: {
-        what: '轮询查看该文档是否已完成入库，避免在未就绪时提问。',
-        choose: '每 1 秒查询一次，最多 30 次；当 chunk_count > 0 判定完成。',
-        done: '看到 indexed=true 且 chunk_count 大于 0。',
+        what: 'Poll file stats until indexing is complete before QA.',
+        choose: 'Poll every second; stop when chunk_count > 0.',
+        done: 'indexed=true and chunk_count > 0.',
       },
     },
     {
@@ -150,9 +178,9 @@ function createSteps(query, filePath, docTitle) {
       error: '',
       durationMs: 0,
       explain: {
-        what: '对问题并行执行关键词召回与向量召回，再用 RRF 融合排序。',
-        choose: '先取两路候选并集，再按 1/(k+rank) 计算融合分，选择 Top-K。',
-        done: '得到 fusion 命中列表、候选流转、耗时与融合贡献明细。',
+        what: 'Run keyword and vector retrieval in parallel, then fuse with RRF.',
+        choose: 'Merge candidates and rank by 1/(k+rank), then pick Top-K.',
+        done: 'Get fusion hits, candidate flow stats, and timing details.',
       },
     },
     {
@@ -166,9 +194,9 @@ function createSteps(query, filePath, docTitle) {
       error: '',
       durationMs: 0,
       explain: {
-        what: '将 Top-K 上下文拼装成 messages，发送给大模型生成答案。',
-        choose: '仅使用检索得到的上下文，不额外引入外部知识。',
-        done: '收到 token 流并结束，展示最终答案与完整 llm_input。',
+        what: 'Build LLM messages from Top-K contexts and question.',
+        choose: 'Use only retrieved context; do not add external knowledge.',
+        done: 'Receive token stream and final answer with llm_input.',
       },
     },
   ];
@@ -217,30 +245,14 @@ function extractSsePayloads(buffer) {
   let remaining = buffer;
 
   while (true) {
-    const n1 = remaining.indexOf('\n\n');
-    const n2 = remaining.indexOf('\\n\\n');
-
-    let splitAt = -1;
-    let delimiterSize = 2;
-
-    if (n1 !== -1 && n2 !== -1) {
-      splitAt = Math.min(n1, n2);
-      delimiterSize = splitAt === n1 ? 2 : 4;
-    } else if (n1 !== -1) {
-      splitAt = n1;
-      delimiterSize = 2;
-    } else if (n2 !== -1) {
-      splitAt = n2;
-      delimiterSize = 4;
-    }
-
+    const splitAt = remaining.indexOf('\n\n');
     if (splitAt === -1) break;
 
     const frame = remaining.slice(0, splitAt).trim();
-    remaining = remaining.slice(splitAt + delimiterSize);
+    remaining = remaining.slice(splitAt + 2);
 
     if (!frame) continue;
-    const lines = frame.split(/\r?\n|\\n/);
+    const lines = frame.split(/\r?\n/);
     for (const line of lines) {
       if (!line.startsWith('data:')) continue;
       const raw = line.replace(/^data:\s?/, '').trim();
@@ -264,6 +276,29 @@ function formatMs(value) {
 function formatPercent(value) {
   if (typeof value !== 'number' || Number.isNaN(value)) return '-';
   return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatDateTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
+}
+
+function pickMetric(metrics, name, preferredK = 5) {
+  if (!metrics || typeof metrics !== 'object') return '-';
+  const exact = metrics[`${name}@${preferredK}`];
+  if (typeof exact === 'number') return exact.toFixed(4);
+  const key = Object.keys(metrics)
+    .filter((item) => item.startsWith(`${name}@`))
+    .sort((a, b) => {
+      const aK = Number(a.split('@')[1] || 0);
+      const bK = Number(b.split('@')[1] || 0);
+      return aK - bK;
+    })[0];
+  if (!key) return '-';
+  const fallback = metrics[key];
+  return typeof fallback === 'number' ? fallback.toFixed(4) : '-';
 }
 
 function statusLabel(status) {
@@ -308,7 +343,7 @@ function StepCard({ step }) {
   );
 }
 
-function HitList({ title, hits }) {
+function HitList({ title, hits, onOpenChunk }) {
   return (
     <section className="trace-block">
       <h4>{title}</h4>
@@ -323,6 +358,11 @@ function HitList({ title, hits }) {
               </div>
               <small>score={formatNumber(hit.score)} rrf={formatNumber(hit.rrf_score)}</small>
               <p>{hit.preview}</p>
+              {!!hit.content && (
+                <button type="button" className="inline-btn" onClick={() => onOpenChunk(title, hit)}>
+                  查看详情
+                </button>
+              )}
             </li>
           ))}
         </ul>
@@ -375,7 +415,7 @@ function FlowList({ flow }) {
   );
 }
 
-function FusionTable({ rows }) {
+function FusionTable({ rows, onOpenChunk, sourceTitle }) {
   if (!rows?.length) return <p className="muted">无融合明细</p>;
   return (
     <div className="table-wrap">
@@ -390,6 +430,7 @@ function FusionTable({ rows }) {
             <th>v_rrf</th>
             <th>rrf_total</th>
             <th>chunk</th>
+            <th>detail</th>
           </tr>
         </thead>
         <tbody>
@@ -403,6 +444,13 @@ function FusionTable({ rows }) {
               <td>{formatNumber(row.vector_rrf)}</td>
               <td>{formatNumber(row.rrf_score)}</td>
               <td>{row.chunk_id ?? '-'}</td>
+              <td>
+                {!!row.content && (
+                  <button type="button" className="inline-btn" onClick={() => onOpenChunk(sourceTitle, row)}>
+                    查看
+                  </button>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -411,12 +459,33 @@ function FusionTable({ rows }) {
   );
 }
 
+function ChunkDetailPanel({ chunk, onClose }) {
+  if (!chunk) return null;
+  return (
+    <section className="trace-block chunk-detail-panel">
+      <div className="chunk-detail-head">
+        <h4>Chunk 详情</h4>
+        <button type="button" className="inline-btn" onClick={onClose}>
+          关闭
+        </button>
+      </div>
+      <div className="metric-row">
+        <span>source: {chunk.source || '-'}</span>
+        <span>rank: {chunk.rank ?? '-'}</span>
+        <span>chunk_id: {chunk.chunk_id ?? '-'}</span>
+      </div>
+      <p className="muted">{chunk.file_name || chunk.file_path || chunk.id}</p>
+      <pre className="raw-block">{chunk.content || chunk.preview || ''}</pre>
+    </section>
+  );
+}
+
 function LlmInputPanel({ llmInput }) {
   if (!llmInput) {
     return (
       <section className="trace-block">
         <h4>传给大模型的内容（完整）</h4>
-        <p className="muted">执行流程后显示模型输入 messages 与上下文全文。</p>
+        <p className="muted">执行流程后显示模型输入 messages 与 contexts 全文。</p>
       </section>
     );
   }
@@ -439,11 +508,117 @@ function LlmInputPanel({ llmInput }) {
   );
 }
 
+function BaselineReportPanel({ latest, items }) {
+  const [selectedFileName, setSelectedFileName] = useState('');
+
+  useEffect(() => {
+    if (!items?.length) {
+      setSelectedFileName('');
+      return;
+    }
+    if (!selectedFileName || !items.some((item) => item.file_name === selectedFileName)) {
+      setSelectedFileName(items[0].file_name);
+    }
+  }, [items, selectedFileName]);
+
+  const activeSummary = useMemo(() => {
+    if (items?.length) {
+      const matched = items.find((item) => item.file_name === selectedFileName);
+      if (matched) return matched;
+      return items[0];
+    }
+    return latest || null;
+  }, [items, latest, selectedFileName]);
+
+  const methods = activeSummary?.metrics ? Object.keys(activeSummary.metrics) : [];
+
+  return (
+    <section className="workflow">
+      <h2>公共基线报表</h2>
+      {!activeSummary && <p className="muted">暂无基线报表，请先运行 eval 脚本。</p>}
+      {!!activeSummary && (
+        <>
+          <div className="metric-row">
+            <span>dataset: {activeSummary.dataset || '-'}</span>
+            <span>method: {activeSummary.method || '-'}</span>
+            <span>top_k: {activeSummary.top_k ?? '-'}</span>
+            <span>created_at: {formatDateTime(activeSummary.created_at)}</span>
+            <span>cost_total: {activeSummary.cost_seconds_total ?? '-'} s</span>
+          </div>
+          <div className="metric-row">
+            <span>corpus: {activeSummary.counts?.corpus ?? '-'}</span>
+            <span>queries: {activeSummary.counts?.queries ?? '-'}</span>
+            <span>qrels_queries: {activeSummary.counts?.qrels_queries ?? '-'}</span>
+            <span>qrels_pairs: {activeSummary.counts?.qrels_pairs ?? '-'}</span>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>method</th>
+                  <th>hit@5</th>
+                  <th>recall@5</th>
+                  <th>mrr@10</th>
+                  <th>map@10</th>
+                  <th>ndcg@10</th>
+                  <th>cost(s)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {methods.map((method) => {
+                  const metrics = activeSummary.metrics?.[method] || {};
+                  const cost = activeSummary.method_cost_seconds?.[method];
+                  return (
+                    <tr key={`metric-${method}`}>
+                      <td>{method}</td>
+                      <td>{pickMetric(metrics, 'hit', 5)}</td>
+                      <td>{pickMetric(metrics, 'recall', 5)}</td>
+                      <td>{pickMetric(metrics, 'mrr', 10)}</td>
+                      <td>{pickMetric(metrics, 'map', 10)}</td>
+                      <td>{pickMetric(metrics, 'ndcg', 10)}</td>
+                      <td>{typeof cost === 'number' ? cost.toFixed(3) : '-'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {!!items?.length && (
+        <div className="history-list">
+          <h4>鍘嗗彶鎶ヨ〃</h4>
+          <ul>
+            {items.slice(0, 6).map((item) => (
+              <li key={item.file_name}>
+                <button
+                  type="button"
+                  className={`history-item-btn ${selectedFileName === item.file_name ? 'active' : ''}`}
+                  onClick={() => setSelectedFileName(item.file_name)}
+                >
+                  <span>{item.file_name}</span>
+                  <small>{formatDateTime(item.created_at)}</small>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function App() {
+  const [activePage, setActivePage] = useState('demo');
+  const [evalDocs, setEvalDocs] = useState(EVAL_DOC_LIBRARY);
+  const visibleDocs = useMemo(
+    () => (activePage === 'eval' ? evalDocs : DEMO_DOC_LIBRARY),
+    [activePage, evalDocs],
+  );
   const [selectedDocId, setSelectedDocId] = useState(DEFAULT_DOC.id);
   const selectedDoc = useMemo(
-    () => DOC_LIBRARY.find((item) => item.id === selectedDocId) || DEFAULT_DOC,
-    [selectedDocId],
+    () => visibleDocs.find((item) => item.id === selectedDocId) || visibleDocs[0] || DEFAULT_DOC,
+    [visibleDocs, selectedDocId],
   );
   const [question, setQuestion] = useState(DEFAULT_QUESTION);
   const [docPath, setDocPath] = useState(DEFAULT_DOC.filePath);
@@ -451,17 +626,24 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [evalHint, setEvalHint] = useState('');
+  const [reportHint, setReportHint] = useState('');
 
   const [health, setHealth] = useState(null);
   const [chunkCount, setChunkCount] = useState(0);
   const [answer, setAnswer] = useState('');
   const [retrieval, setRetrieval] = useState(null);
   const [llmInput, setLlmInput] = useState(null);
+  const [activeChunk, setActiveChunk] = useState(null);
+  const [evalReports, setEvalReports] = useState([]);
+  const [latestEvalReport, setLatestEvalReport] = useState(null);
 
   const apiBase = useMemo(() => import.meta.env.VITE_API_BASE_URL || '', []);
 
   useEffect(() => {
     refreshStatus();
+    refreshEvalDatasets();
+    refreshEvalReports();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -476,9 +658,16 @@ export default function App() {
     setQuestion(selectedDoc.examples[0] || DEFAULT_QUESTION);
     setSteps(createSteps(selectedDoc.examples[0] || DEFAULT_QUESTION, selectedDoc.filePath, selectedDoc.title));
     setLlmInput(null);
+    setActiveChunk(null);
     refreshStatus(selectedDoc.filePath);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDocId]);
+  }, [selectedDoc]);
+
+  useEffect(() => {
+    const first = visibleDocs[0];
+    if (!first) return;
+    setSelectedDocId(first.id);
+  }, [visibleDocs]);
 
   function patchStep(id, patch) {
     setSteps((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
@@ -518,10 +707,52 @@ export default function App() {
     }
   }
 
+  async function refreshEvalDatasets() {
+    try {
+      const payload = await apiGet(apiBase, '/api/v1/eval/datasets/manifest');
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      if (!items.length) {
+        setEvalHint('未检测到 DuRetrieval 数据集清单。');
+        return;
+      }
+
+      const mapped = items.map((item) => ({
+        id: item.id,
+        title: item.title || item.id,
+        filePath: item.corpus_file_path_runtime || item.resolved_file_path || '',
+        prepare: 'local',
+        examples: item.sample_questions?.slice(0, 3)?.length
+          ? item.sample_questions.slice(0, 3)
+          : ['请概括这份语料包含的主题'],
+        exists: item.exists,
+        indexed: item.indexed,
+        chunkCount: item.chunk_count || 0,
+      }));
+
+      setEvalDocs(mapped);
+      setEvalHint('评测数据集清单已同步。');
+    } catch (err) {
+      setEvalHint(`评测数据集清单读取失败：${String(err.message || err)}`);
+    }
+  }
+
+  async function refreshEvalReports() {
+    try {
+      const payload = await apiGet(apiBase, '/api/v1/eval/reports?limit=20');
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      setEvalReports(items);
+      setLatestEvalReport(payload.latest || null);
+      setReportHint(items.length ? `已同步 ${items.length} 份基线报表。` : '暂无基线报表，请先运行评测脚本。');
+    } catch (err) {
+      setReportHint(`基线报表读取失败：${String(err.message || err)}`);
+    }
+  }
+
   async function askWithTrace(queryText) {
     setAnswer('');
     setRetrieval(null);
     setLlmInput(null);
+    setActiveChunk(null);
 
     const payload = {
       query: queryText,
@@ -626,6 +857,7 @@ export default function App() {
     setAnswer('');
     setRetrieval(null);
     setLlmInput(null);
+    setActiveChunk(null);
     setSteps(createSteps(queryText, activeDoc.filePath, activeDoc.title));
 
     try {
@@ -657,26 +889,55 @@ export default function App() {
         }),
       );
 
-      await executeStep('index', () =>
-        apiPost(apiBase, '/api/v1/index/file', {
-          file_path: targetPath,
-        }),
+      const preStats = await apiGet(
+        apiBase,
+        `/api/v1/debug/file-stats?file_path=${encodeURIComponent(targetPath)}`,
       );
 
-      const pollResult = await executeStep('poll', async () => {
-        let latest = null;
-        for (let i = 0; i < 30; i += 1) {
-          latest = await apiGet(apiBase, `/api/v1/debug/file-stats?file_path=${encodeURIComponent(targetPath)}`);
-          if (latest.chunk_count > 0) {
-            return {
-              ...latest,
-              polls: i + 1,
-            };
+      let pollResult = preStats;
+      if ((preStats.chunk_count || 0) > 0) {
+        patchStep('index', {
+          status: 'done',
+          output: {
+            status: 'skipped',
+            reason: 'already_indexed',
+            file_path: targetPath,
+            chunk_count: preStats.chunk_count,
+          },
+          durationMs: 0,
+        });
+        patchStep('poll', {
+          status: 'done',
+          output: {
+            ...preStats,
+            polls: 0,
+            status: 'already_indexed',
+          },
+          durationMs: 0,
+        });
+      } else {
+        await executeStep('index', () =>
+          apiPost(apiBase, '/api/v1/index/file', {
+            file_path: targetPath,
+          }),
+        );
+
+        const maxPolls = activePage === 'eval' ? 240 : 30;
+        pollResult = await executeStep('poll', async () => {
+          let latest = null;
+          for (let i = 0; i < maxPolls; i += 1) {
+            latest = await apiGet(apiBase, `/api/v1/debug/file-stats?file_path=${encodeURIComponent(targetPath)}`);
+            if (latest.chunk_count > 0) {
+              return {
+                ...latest,
+                polls: i + 1,
+              };
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1000));
           }
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
-        throw new Error('索引超时：30 秒内未检测到入库 chunk');
-      });
+          throw new Error(`索引超时：${maxPolls} 秒内未检测到入库 chunk`);
+        });
+      }
 
       setChunkCount(pollResult.chunk_count || 0);
 
@@ -698,11 +959,46 @@ export default function App() {
     }
   }
 
+  function openChunkDetail(sourceTitle, item) {
+    setActiveChunk({
+      source: sourceTitle,
+      id: item.id,
+      rank: item.rank ?? item.final_rank,
+      file_name: item.file_name,
+      file_path: item.file_path,
+      chunk_id: item.chunk_id,
+      preview: item.preview,
+      content: item.content,
+    });
+  }
+
   return (
     <div className="app">
       <header className="hero">
         <h1>Everything Ent Hybrid</h1>
-        <p>零配置体验：固定测试文档 + 一键跑通索引与问答 + 每一步输入输出可视化。</p>
+        <p>
+          {activePage === 'demo'
+            ? '零配置体验：固定测试文档 + 一键跑通索引与问答 + 每一步输入输出可视化。'
+            : 'DuRetrieval 评测页：使用 C-MTEB 与 mteb 两套语料快照执行索引与问答验证。'}
+        </p>
+        <div className="tab-row">
+          <button
+            type="button"
+            className={activePage === 'demo' ? '' : 'ghost'}
+            onClick={() => setActivePage('demo')}
+            disabled={running}
+          >
+            流程演示
+          </button>
+          <button
+            type="button"
+            className={activePage === 'eval' ? '' : 'ghost'}
+            onClick={() => setActivePage('eval')}
+            disabled={running}
+          >
+            DuRetrieval 评测
+          </button>
+        </div>
       </header>
 
       <section className="summary">
@@ -723,13 +1019,17 @@ export default function App() {
           <h2>执行账号</h2>
           <p>{DEFAULT_USER_ID}</p>
         </article>
+        <article>
+          <h2>当前页面</h2>
+          <p>{activePage === 'demo' ? '流程演示' : 'DuRetrieval 评测'}</p>
+        </article>
       </section>
 
       <section className="actions">
         <label>
-          选择测试文档
+          {activePage === 'demo' ? '选择测试文档' : '选择评测数据集'}
           <select value={selectedDocId} onChange={(event) => setSelectedDocId(event.target.value)}>
-            {DOC_LIBRARY.map((doc) => (
+            {visibleDocs.map((doc) => (
               <option key={doc.id} value={doc.id}>
                 {doc.title}
               </option>
@@ -743,6 +1043,10 @@ export default function App() {
             </button>
           ))}
         </div>
+        {activePage === 'eval' && (
+          <p className="muted">
+            当前问答基于本地数据文件：{selectedDoc.filePath}。如未入库，会先自动触发索引。          </p>
+        )}
         <label>
           测试问题
           <textarea
@@ -753,15 +1057,49 @@ export default function App() {
         </label>
         <div className="action-row">
           <button type="button" onClick={runDemo} disabled={running}>
-            {running ? '执行中...' : '一键跑通测试流程'}
+            {running ? '执行中...' : activePage === 'demo' ? '一键跑通测试流程' : '一键跑通评测问答流程'}
           </button>
           <button type="button" className="ghost" onClick={refreshStatus} disabled={running}>
             刷新状态
           </button>
+          {activePage === 'eval' && (
+            <button type="button" className="ghost" onClick={refreshEvalDatasets} disabled={running}>
+              刷新评测清单
+            </button>
+          )}
+          {activePage === 'eval' && (
+            <button type="button" className="ghost" onClick={refreshEvalReports} disabled={running}>
+              刷新基线报表
+            </button>
+          )}
         </div>
+        {activePage === 'eval' && evalHint && <p className="muted">{evalHint}</p>}
+        {activePage === 'eval' && reportHint && <p className="muted">{reportHint}</p>}
         {notice && <p className="notice">{notice}</p>}
         {error && <p className="error">{error}</p>}
       </section>
+
+      {activePage === 'eval' && (
+        <>
+          <section className="workflow">
+            <h2>DuRetrieval 数据集状态</h2>
+            <div className="dataset-grid">
+              {evalDocs.map((item) => (
+                <article key={item.id} className="step-card">
+                  <h3>{item.title}</h3>
+                  <p className="muted">{item.filePath}</p>
+                  <div className="metric-row">
+                    <span>exists: {item.exists ? 'yes' : 'no'}</span>
+                    <span>indexed: {item.indexed ? 'yes' : 'no'}</span>
+                    <span>chunk: {item.chunkCount ?? 0}</span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+          <BaselineReportPanel latest={latestEvalReport} items={evalReports} />
+        </>
+      )}
 
       <section className="workflow">
         <h2>流程可视化（输入 / 输出）</h2>
@@ -803,21 +1141,31 @@ export default function App() {
             </div>
             <section className="trace-block">
               <h4>融合贡献明细（Top Final）</h4>
-              <FusionTable rows={retrieval.trace.fusion?.detailed_hits || []} />
+              <FusionTable
+                rows={retrieval.trace.fusion?.detailed_hits || []}
+                onOpenChunk={openChunkDetail}
+                sourceTitle="融合贡献明细"
+              />
             </section>
             <section className="trace-block">
               <h4>未进入 Top-K 的候选</h4>
-              <FusionTable rows={retrieval.trace.fusion?.dropped_candidates || []} />
+              <FusionTable
+                rows={retrieval.trace.fusion?.dropped_candidates || []}
+                onOpenChunk={openChunkDetail}
+                sourceTitle="未进入Top-K"
+              />
             </section>
             <div className="trace-grid">
-              <HitList title="关键词召回" hits={retrieval.trace.keyword?.hits || []} />
-              <HitList title="向量召回" hits={retrieval.trace.vector?.hits || []} />
-              <HitList title="融合结果" hits={retrieval.trace.fusion?.hits || []} />
+              <HitList title="关键词召回" hits={retrieval.trace.keyword?.hits || []} onOpenChunk={openChunkDetail} />
+              <HitList title="向量召回" hits={retrieval.trace.vector?.hits || []} onOpenChunk={openChunkDetail} />
+              <HitList title="融合结果" hits={retrieval.trace.fusion?.hits || []} onOpenChunk={openChunkDetail} />
             </div>
           </>
         )}
+        <ChunkDetailPanel chunk={activeChunk} onClose={() => setActiveChunk(null)} />
         <LlmInputPanel llmInput={llmInput} />
       </section>
     </div>
   );
 }
+
