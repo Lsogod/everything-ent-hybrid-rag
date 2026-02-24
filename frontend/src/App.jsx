@@ -107,6 +107,10 @@ const EVAL_DOC_LIBRARY = DURETRIEVAL_DOCS;
 const DEFAULT_DOC = DEMO_DOC_LIBRARY[0];
 const DEFAULT_QUESTION = DEFAULT_DOC.examples[0];
 
+function createConversationId() {
+  return `chat-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
 function createSteps(query, filePath, docTitle) {
   return [
     {
@@ -236,6 +240,22 @@ async function apiPost(baseUrl, path, body) {
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`POST ${path} failed: ${res.status} ${text}`);
+  }
+  return res.json();
+}
+
+async function apiDelete(baseUrl, path, body) {
+  const options = {
+    method: 'DELETE',
+    headers: buildHeaders(Boolean(body)),
+  };
+  if (body) {
+    options.body = JSON.stringify(body);
+  }
+  const res = await fetch(resolveUrl(baseUrl, path), options);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`DELETE ${path} failed: ${res.status} ${text}`);
   }
   return res.json();
 }
@@ -460,23 +480,34 @@ function FusionTable({ rows, onOpenChunk, sourceTitle }) {
 }
 
 function ChunkDetailPanel({ chunk, onClose }) {
+  useEffect(() => {
+    if (!chunk) return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [chunk, onClose]);
+
   if (!chunk) return null;
   return (
-    <section className="trace-block chunk-detail-panel">
-      <div className="chunk-detail-head">
-        <h4>Chunk 详情</h4>
-        <button type="button" className="inline-btn" onClick={onClose}>
-          关闭
-        </button>
-      </div>
-      <div className="metric-row">
-        <span>source: {chunk.source || '-'}</span>
-        <span>rank: {chunk.rank ?? '-'}</span>
-        <span>chunk_id: {chunk.chunk_id ?? '-'}</span>
-      </div>
-      <p className="muted">{chunk.file_name || chunk.file_path || chunk.id}</p>
-      <pre className="raw-block">{chunk.content || chunk.preview || ''}</pre>
-    </section>
+    <div className="chunk-modal-backdrop" onClick={onClose}>
+      <section className="chunk-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="chunk-detail-head">
+          <h4>Chunk 详情</h4>
+          <button type="button" className="inline-btn" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        <div className="metric-row">
+          <span>source: {chunk.source || '-'}</span>
+          <span>rank: {chunk.rank ?? '-'}</span>
+          <span>chunk_id: {chunk.chunk_id ?? '-'}</span>
+        </div>
+        <p className="muted">{chunk.file_name || chunk.file_path || chunk.id}</p>
+        <pre className="raw-block">{chunk.content || chunk.preview || ''}</pre>
+      </section>
+    </div>
   );
 }
 
@@ -511,24 +542,22 @@ function LlmInputPanel({ llmInput }) {
 function BaselineReportPanel({ latest, items }) {
   const [selectedFileName, setSelectedFileName] = useState('');
 
-  useEffect(() => {
-    if (!items?.length) {
-      setSelectedFileName('');
-      return;
+  const effectiveSelectedFileName = useMemo(() => {
+    if (!items?.length) return '';
+    if (selectedFileName && items.some((item) => item.file_name === selectedFileName)) {
+      return selectedFileName;
     }
-    if (!selectedFileName || !items.some((item) => item.file_name === selectedFileName)) {
-      setSelectedFileName(items[0].file_name);
-    }
+    return items[0].file_name;
   }, [items, selectedFileName]);
 
   const activeSummary = useMemo(() => {
     if (items?.length) {
-      const matched = items.find((item) => item.file_name === selectedFileName);
+      const matched = items.find((item) => item.file_name === effectiveSelectedFileName);
       if (matched) return matched;
       return items[0];
     }
     return latest || null;
-  }, [items, latest, selectedFileName]);
+  }, [items, latest, effectiveSelectedFileName]);
 
   const methods = activeSummary?.metrics ? Object.keys(activeSummary.metrics) : [];
 
@@ -593,7 +622,7 @@ function BaselineReportPanel({ latest, items }) {
               <li key={item.file_name}>
                 <button
                   type="button"
-                  className={`history-item-btn ${selectedFileName === item.file_name ? 'active' : ''}`}
+                  className={`history-item-btn ${effectiveSelectedFileName === item.file_name ? 'is-active' : ''}`}
                   onClick={() => setSelectedFileName(item.file_name)}
                 >
                   <span>{item.file_name}</span>
@@ -637,6 +666,36 @@ export default function App() {
   const [activeChunk, setActiveChunk] = useState(null);
   const [evalReports, setEvalReports] = useState([]);
   const [latestEvalReport, setLatestEvalReport] = useState(null);
+  const [deletePath, setDeletePath] = useState(DEFAULT_DOC.filePath);
+  const [myPermissions, setMyPermissions] = useState([]);
+  const [permissionUserId, setPermissionUserId] = useState(DEFAULT_USER_ID);
+  const [permissionLookup, setPermissionLookup] = useState([]);
+  const [roleName, setRoleName] = useState('analyst');
+  const [permissionCode, setPermissionCode] = useState('kb:export');
+  const [permissionDescription, setPermissionDescription] = useState('Allow exporting indexed chunks');
+  const [bindRoleName, setBindRoleName] = useState('analyst');
+  const [bindPermissionCode, setBindPermissionCode] = useState('kb:export');
+  const [assignUserId, setAssignUserId] = useState(DEFAULT_USER_ID);
+  const [assignRoleName, setAssignRoleName] = useState('analyst');
+  const [adminResult, setAdminResult] = useState(null);
+  const [adminNotice, setAdminNotice] = useState('');
+  const [adminError, setAdminError] = useState('');
+  const [sessionUserId, setSessionUserId] = useState(DEFAULT_USER_ID);
+  const [sessionLimit, setSessionLimit] = useState(20);
+  const [messageLimit, setMessageLimit] = useState(100);
+  const [sessions, setSessions] = useState([]);
+  const [selectedSessionId, setSelectedSessionId] = useState('');
+  const [sessionMessages, setSessionMessages] = useState([]);
+  const [chatHint, setChatHint] = useState('');
+  const [chatError, setChatError] = useState('');
+  const [chatConversationId, setChatConversationId] = useState(() => createConversationId());
+  const [chatInput, setChatInput] = useState('');
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatStreaming, setChatStreaming] = useState(false);
+  const [chatDebugMode, setChatDebugMode] = useState(false);
+  const [chatTrace, setChatTrace] = useState(null);
+  const [chatLlmInput, setChatLlmInput] = useState(null);
+  const [chatCitations, setChatCitations] = useState([]);
 
   const apiBase = useMemo(() => import.meta.env.VITE_API_BASE_URL || '', []);
 
@@ -644,6 +703,8 @@ export default function App() {
     refreshStatus();
     refreshEvalDatasets();
     refreshEvalReports();
+    refreshMyPermissions();
+    refreshSessions(DEFAULT_USER_ID, 20);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -654,9 +715,22 @@ export default function App() {
   }, [notice]);
 
   useEffect(() => {
+    if (!adminNotice) return;
+    const timer = setTimeout(() => setAdminNotice(''), 1800);
+    return () => clearTimeout(timer);
+  }, [adminNotice]);
+
+  useEffect(() => {
+    if (!chatHint) return;
+    const timer = setTimeout(() => setChatHint(''), 1800);
+    return () => clearTimeout(timer);
+  }, [chatHint]);
+
+  useEffect(() => {
     setDocPath(selectedDoc.filePath);
     setQuestion(selectedDoc.examples[0] || DEFAULT_QUESTION);
     setSteps(createSteps(selectedDoc.examples[0] || DEFAULT_QUESTION, selectedDoc.filePath, selectedDoc.title));
+    setDeletePath(selectedDoc.filePath);
     setLlmInput(null);
     setActiveChunk(null);
     refreshStatus(selectedDoc.filePath);
@@ -668,6 +742,14 @@ export default function App() {
     if (!first) return;
     setSelectedDocId(first.id);
   }, [visibleDocs]);
+
+  useEffect(() => {
+    if (activePage !== 'chat') return;
+    if (!selectedSessionId) return;
+    if (chatMessages.length) return;
+    refreshSessionMessages(selectedSessionId, messageLimit, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePage, selectedSessionId]);
 
   function patchStep(id, patch) {
     setSteps((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
@@ -739,12 +821,296 @@ export default function App() {
   async function refreshEvalReports() {
     try {
       const payload = await apiGet(apiBase, '/api/v1/eval/reports?limit=20');
+      let latest = payload.latest || null;
+      try {
+        const latestPayload = await apiGet(apiBase, '/api/v1/eval/reports/latest');
+        if (latestPayload?.latest?.summary) {
+          latest = latestPayload.latest.summary;
+        }
+      } catch {
+        // Ignore latest endpoint failures and fallback to list endpoint summary.
+      }
       const items = Array.isArray(payload.items) ? payload.items : [];
       setEvalReports(items);
-      setLatestEvalReport(payload.latest || null);
+      setLatestEvalReport(latest);
       setReportHint(items.length ? `已同步 ${items.length} 份基线报表。` : '暂无基线报表，请先运行评测脚本。');
     } catch (err) {
       setReportHint(`基线报表读取失败：${String(err.message || err)}`);
+    }
+  }
+
+  async function refreshMyPermissions() {
+    try {
+      const payload = await apiGet(apiBase, '/api/v1/me/permissions');
+      const list = Array.isArray(payload.permissions) ? payload.permissions : [];
+      setMyPermissions(list);
+      return list;
+    } catch (err) {
+      setAdminError(String(err.message || err));
+      return [];
+    }
+  }
+
+  async function runAdminAction(actionName, runner) {
+    setAdminNotice('');
+    setAdminError('');
+    try {
+      const payload = await runner();
+      setAdminResult(payload);
+      setAdminNotice(`${actionName} 已完成`);
+      await refreshMyPermissions();
+      return payload;
+    } catch (err) {
+      setAdminError(String(err.message || err));
+      return null;
+    }
+  }
+
+  async function queryUserPermissions(userId = permissionUserId) {
+    const target = userId.trim();
+    if (!target) {
+      setAdminError('请输入要查询的用户 ID');
+      return;
+    }
+    const payload = await runAdminAction('查询用户权限', () =>
+      apiGet(apiBase, `/api/v1/admin/users/${encodeURIComponent(target)}/permissions`),
+    );
+    if (payload) {
+      setPermissionLookup(Array.isArray(payload.permissions) ? payload.permissions : []);
+    }
+  }
+
+  async function deleteIndexedFile() {
+    const targetPath = deletePath.trim();
+    if (!targetPath) {
+      setAdminError('请输入需要删除索引的文件路径');
+      return;
+    }
+    const payload = await runAdminAction('删除索引', () =>
+      apiDelete(apiBase, '/api/v1/index/file', {
+        file_path: targetPath,
+      }),
+    );
+    if (payload) {
+      await refreshStatus(targetPath);
+      setChunkCount(0);
+    }
+  }
+
+  async function refreshSessionMessages(sessionId = selectedSessionId, limit = messageLimit, syncToChat = false) {
+    const targetSessionId = (sessionId || '').trim();
+    if (!targetSessionId) {
+      setSessionMessages([]);
+      if (syncToChat) {
+        setChatMessages([]);
+      }
+      return;
+    }
+    setChatError('');
+    try {
+      const payload = await apiGet(
+        apiBase,
+        `/api/v1/chat/sessions/${encodeURIComponent(targetSessionId)}/messages?limit=${limit}`,
+      );
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      setSessionMessages(items);
+      if (syncToChat) {
+        const normalized = items.map((item) => ({
+          id: item.id || `${item.role || 'assistant'}-${item.created_at || Date.now()}`,
+          role: item.role || 'assistant',
+          content: item.content || '',
+          citations: item.citations?.items || [],
+          created_at: item.created_at || null,
+        }));
+        setChatConversationId(targetSessionId);
+        setChatMessages(normalized);
+        setChatTrace(null);
+        setChatLlmInput(null);
+        setChatCitations([]);
+      }
+      setChatHint(`已加载 ${items.length} 条会话消息`);
+    } catch (err) {
+      setChatError(String(err.message || err));
+    }
+  }
+
+  async function refreshSessions(
+    userId = sessionUserId,
+    limit = sessionLimit,
+    preferredSessionId = '',
+    syncToChat = false,
+  ) {
+    const targetUserId = userId.trim();
+    if (!targetUserId) {
+      setChatError('请输入会话用户 ID');
+      return;
+    }
+    setChatError('');
+    try {
+      const payload = await apiGet(
+        apiBase,
+        `/api/v1/chat/sessions?user_id=${encodeURIComponent(targetUserId)}&limit=${limit}`,
+      );
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      setSessions(items);
+      if (!items.length) {
+        setSelectedSessionId('');
+        setSessionMessages([]);
+        if (syncToChat) {
+          setChatMessages([]);
+        }
+        setChatHint('当前用户暂无会话记录');
+        return;
+      }
+      const preferred = preferredSessionId.trim();
+      const hasPreferred = preferred && items.some((item) => item.id === preferred);
+      const nextSessionId = hasPreferred ? preferred : items[0].id;
+      setSelectedSessionId(nextSessionId);
+      setChatHint(`已加载 ${items.length} 个会话`);
+      await refreshSessionMessages(nextSessionId, messageLimit, syncToChat);
+    } catch (err) {
+      setChatError(String(err.message || err));
+    }
+  }
+
+  function startNewConversation() {
+    setSelectedSessionId('');
+    setSessionMessages([]);
+    setChatMessages([]);
+    setChatInput('');
+    setChatTrace(null);
+    setChatLlmInput(null);
+    setChatCitations([]);
+    setChatConversationId(createConversationId());
+    setChatHint('已创建新会话，可以直接提问。');
+  }
+
+  async function sendChatMessage() {
+    const query = chatInput.trim();
+    if (!query || chatStreaming) return;
+
+    const conversationId = chatConversationId || createConversationId();
+    if (!chatConversationId) {
+      setChatConversationId(conversationId);
+    }
+
+    const userMessageId = `user-${Date.now()}`;
+    const assistantMessageId = `assistant-${Date.now() + 1}`;
+    setChatInput('');
+    setChatError('');
+    setChatTrace(null);
+    setChatLlmInput(null);
+    setChatCitations([]);
+    setChatStreaming(true);
+
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: userMessageId,
+        role: 'user',
+        content: query,
+        citations: [],
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: assistantMessageId,
+        role: 'assistant',
+        content: '',
+        citations: [],
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    try {
+      const payload = {
+        query,
+        conversation_id: conversationId,
+        user_id: DEFAULT_USER_ID,
+        debug: chatDebugMode,
+      };
+
+      const res = await fetch(resolveUrl(apiBase, '/api/v1/qa/ask'), {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok || !res.body) {
+        const bodyText = await res.text();
+        throw new Error(`qa failed: ${res.status} ${bodyText}`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let assistantText = '';
+      let citations = [];
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const extracted = extractSsePayloads(buffer);
+        buffer = extracted.remaining;
+
+        for (const raw of extracted.payloads) {
+          let event;
+          try {
+            event = JSON.parse(raw);
+          } catch {
+            continue;
+          }
+
+          if (event.type === 'context') {
+            citations = event.citations || [];
+            setChatCitations(citations);
+            continue;
+          }
+          if (event.type === 'trace') {
+            setChatTrace(event.trace || null);
+            continue;
+          }
+          if (event.type === 'llm_input') {
+            setChatLlmInput(event.llm_input || null);
+            continue;
+          }
+          if (event.type === 'token') {
+            assistantText += event.text || '';
+            setChatMessages((prev) =>
+              prev.map((item) => (item.id === assistantMessageId ? { ...item, content: assistantText } : item)),
+            );
+          }
+        }
+      }
+
+      setChatMessages((prev) =>
+        prev.map((item) =>
+          item.id === assistantMessageId
+            ? {
+                ...item,
+                content: assistantText || '(无输出)',
+                citations,
+              }
+            : item,
+        ),
+      );
+
+      await refreshSessions(sessionUserId, sessionLimit, conversationId, true);
+    } catch (err) {
+      setChatError(String(err.message || err));
+      setChatMessages((prev) =>
+        prev.map((item) =>
+          item.id === assistantMessageId
+            ? {
+                ...item,
+                content: `请求失败：${String(err.message || err)}`,
+              }
+            : item,
+        ),
+      );
+    } finally {
+      setChatStreaming(false);
     }
   }
 
@@ -977,16 +1343,26 @@ export default function App() {
       <header className="hero">
         <h1>Everything Ent Hybrid</h1>
         <p>
-          {activePage === 'demo'
-            ? '零配置体验：固定测试文档 + 一键跑通索引与问答 + 每一步输入输出可视化。'
-            : 'DuRetrieval 评测页：使用 C-MTEB 与 mteb 两套语料快照执行索引与问答验证。'}
+          {activePage === 'chat'
+            ? '用户问答：会话列表 + 流式回答 + 持久化聊天历史。'
+            : activePage === 'demo'
+              ? '零配置体验：固定测试文档 + 一键跑通索引与问答 + 每一步输入输出可视化。'
+              : 'DuRetrieval 评测页：使用 C-MTEB 与 mteb 两套语料快照执行索引与问答验证。'}
         </p>
         <div className="tab-row">
           <button
             type="button"
+            className={activePage === 'chat' ? '' : 'ghost'}
+            onClick={() => setActivePage('chat')}
+            disabled={running || chatStreaming}
+          >
+            用户问答
+          </button>
+          <button
+            type="button"
             className={activePage === 'demo' ? '' : 'ghost'}
             onClick={() => setActivePage('demo')}
-            disabled={running}
+            disabled={running || chatStreaming}
           >
             流程演示
           </button>
@@ -994,7 +1370,7 @@ export default function App() {
             type="button"
             className={activePage === 'eval' ? '' : 'ghost'}
             onClick={() => setActivePage('eval')}
-            disabled={running}
+            disabled={running || chatStreaming}
           >
             DuRetrieval 评测
           </button>
@@ -1007,13 +1383,22 @@ export default function App() {
           <p>{health?.status || 'unknown'}</p>
         </article>
         <article>
-          <h2>测试文档</h2>
-          <p>{selectedDoc.title}</p>
-          <p className="muted">{docPath}</p>
+          <h2>{activePage === 'chat' ? '当前会话' : '测试文档'}</h2>
+          {activePage === 'chat' ? (
+            <>
+              <p>{chatConversationId || '-'}</p>
+              <p className="muted">session_id: {selectedSessionId || 'new'}</p>
+            </>
+          ) : (
+            <>
+              <p>{selectedDoc.title}</p>
+              <p className="muted">{docPath}</p>
+            </>
+          )}
         </article>
         <article>
-          <h2>已入库 Chunk</h2>
-          <p>{chunkCount}</p>
+          <h2>{activePage === 'chat' ? '消息数量' : '已入库 Chunk'}</h2>
+          <p>{activePage === 'chat' ? chatMessages.length : chunkCount}</p>
         </article>
         <article>
           <h2>执行账号</h2>
@@ -1021,9 +1406,152 @@ export default function App() {
         </article>
         <article>
           <h2>当前页面</h2>
-          <p>{activePage === 'demo' ? '流程演示' : 'DuRetrieval 评测'}</p>
+          <p>{activePage === 'chat' ? '用户问答' : activePage === 'demo' ? '流程演示' : 'DuRetrieval 评测'}</p>
         </article>
       </section>
+
+      {activePage === 'chat' && (
+        <section className="chat-layout">
+          <aside className="chat-sidebar">
+            <h2>会话列表</h2>
+            <label>
+              user_id
+              <input
+                value={sessionUserId}
+                onChange={(event) => setSessionUserId(event.target.value)}
+                placeholder="admin"
+              />
+            </label>
+            <div className="action-row">
+              <button type="button" className="ghost" onClick={() => refreshSessions(sessionUserId, sessionLimit)}>
+                刷新会话
+              </button>
+              <button type="button" className="ghost" onClick={startNewConversation} disabled={chatStreaming}>
+                新建会话
+              </button>
+            </div>
+            {!sessions.length && <p className="muted">暂无会话记录</p>}
+            {!!sessions.length && (
+              <ul className="compact-list">
+                {sessions.map((item) => (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      className={`history-item-btn ${selectedSessionId === item.id ? 'is-active' : ''}`}
+                      onClick={() => {
+                        setSelectedSessionId(item.id);
+                        refreshSessionMessages(item.id, messageLimit, true);
+                      }}
+                    >
+                      <span>{item.title || item.id}</span>
+                      <small>{formatDateTime(item.created_at)}</small>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </aside>
+
+          <section className="chat-main">
+            <div className="chat-main-head">
+              <div>
+                <h2>用户问答窗口</h2>
+                <p className="muted">conversation_id: {chatConversationId || '-'}</p>
+              </div>
+              <button type="button" className="ghost" onClick={() => setChatDebugMode((prev) => !prev)}>
+                {chatDebugMode ? '关闭开发者模式' : '开启开发者模式'}
+              </button>
+            </div>
+
+            <div className="chat-stream">
+              {!chatMessages.length && <p className="muted">输入问题后即可开始对话，答案会流式返回。</p>}
+              {!!chatMessages.length &&
+                chatMessages.map((item) => (
+                  <article key={item.id} className={`chat-bubble ${item.role === 'user' ? 'from-user' : 'from-assistant'}`}>
+                    <div className="message-head">
+                      <strong>{item.role === 'user' ? '用户' : '助手'}</strong>
+                      <small>{formatDateTime(item.created_at)}</small>
+                    </div>
+                    <p className="chat-content">{item.content || (chatStreaming ? '...' : '')}</p>
+                    {!!item.citations?.length && (
+                      <div className="chat-citations">
+                        {item.citations.slice(0, 5).map((citation, idx) => (
+                          <span key={`${item.id}-citation-${idx}`}>
+                            [{idx + 1}] {citation.file_name || citation.file_path || '-'}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </article>
+                ))}
+            </div>
+
+            <section className="chat-compose">
+              <label>
+                输入问题
+                <textarea
+                  value={chatInput}
+                  onChange={(event) => setChatInput(event.target.value)}
+                  placeholder="输入问题，按 Enter 发送，Shift+Enter 换行"
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      sendChatMessage();
+                    }
+                  }}
+                />
+              </label>
+              <div className="action-row">
+                <button type="button" onClick={sendChatMessage} disabled={chatStreaming || !chatInput.trim()}>
+                  {chatStreaming ? '回答中...' : '发送'}
+                </button>
+              </div>
+            </section>
+
+            {chatHint && <p className="notice">{chatHint}</p>}
+            {chatError && <p className="error">{chatError}</p>}
+
+            {chatDebugMode && (
+              <section className="trace">
+                <h2>开发者调试信息</h2>
+                {!chatTrace && <p className="muted">发送问题后显示检索链路与模型输入。</p>}
+                {!!chatTrace && (
+                  <>
+                    <div className="metric-row">
+                      <span>context: {chatCitations.length}</span>
+                      <span>keyword: {chatTrace.keyword?.count ?? 0}</span>
+                      <span>vector: {chatTrace.vector?.count ?? 0}</span>
+                      <span>fusion: {chatTrace.fusion?.count ?? 0}</span>
+                      <span>overlap_rate: {formatPercent(chatTrace.metrics?.overlap_rate)}</span>
+                      <span>total_ms: {formatMs(chatTrace.timing_ms?.total)}</span>
+                    </div>
+                    <div className="trace-grid trace-grid-2">
+                      <section className="trace-block">
+                        <h4>阶段耗时</h4>
+                        <TimingList timing={chatTrace.timing_ms} />
+                      </section>
+                      <section className="trace-block">
+                        <h4>候选流转</h4>
+                        <FlowList flow={chatTrace.flow} />
+                      </section>
+                    </div>
+                    <div className="trace-grid">
+                      <HitList title="关键词召回" hits={chatTrace.keyword?.hits || []} onOpenChunk={openChunkDetail} />
+                      <HitList title="向量召回" hits={chatTrace.vector?.hits || []} onOpenChunk={openChunkDetail} />
+                      <HitList title="融合结果" hits={chatTrace.fusion?.hits || []} onOpenChunk={openChunkDetail} />
+                    </div>
+                  </>
+                )}
+                <ChunkDetailPanel chunk={activeChunk} onClose={() => setActiveChunk(null)} />
+                <LlmInputPanel llmInput={chatLlmInput} />
+              </section>
+            )}
+          </section>
+        </section>
+      )}
+
+      {activePage !== 'chat' && (
+        <>
 
       <section className="actions">
         <label>
@@ -1102,6 +1630,311 @@ export default function App() {
       )}
 
       <section className="workflow">
+        <h2>索引与权限管理</h2>
+        <div className="trace-grid">
+          <section className="trace-block">
+            <h4>当前账号权限</h4>
+            {!myPermissions.length && <p className="muted">暂无权限数据</p>}
+            {!!myPermissions.length && (
+              <div className="metric-row">
+                {myPermissions.map((code) => (
+                  <span key={`my-perm-${code}`}>{code}</span>
+                ))}
+              </div>
+            )}
+            <div className="action-row">
+              <button type="button" className="ghost" onClick={refreshMyPermissions} disabled={running}>
+                刷新我的权限
+              </button>
+            </div>
+          </section>
+
+          <section className="trace-block">
+            <h4>索引删除</h4>
+            <label>
+              file_path
+              <input
+                value={deletePath}
+                onChange={(event) => setDeletePath(event.target.value)}
+                placeholder="/data/knowledge/example.md"
+              />
+            </label>
+            <div className="action-row">
+              <button type="button" className="ghost" onClick={deleteIndexedFile} disabled={running}>
+                删除该文件索引
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <div className="trace-grid">
+          <section className="trace-block">
+            <h4>RBAC 初始化与查询</h4>
+            <label>
+              查询用户 ID
+              <input
+                value={permissionUserId}
+                onChange={(event) => setPermissionUserId(event.target.value)}
+                placeholder="admin"
+              />
+            </label>
+            <div className="action-row">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => runAdminAction('RBAC 初始化', () => apiPost(apiBase, '/api/v1/admin/bootstrap', {}))}
+                disabled={running}
+              >
+                执行 RBAC Bootstrap
+              </button>
+              <button type="button" className="ghost" onClick={() => queryUserPermissions()} disabled={running}>
+                查询用户权限
+              </button>
+            </div>
+            {!!permissionLookup.length && (
+              <div className="metric-row">
+                {permissionLookup.map((code) => (
+                  <span key={`lookup-perm-${code}`}>{code}</span>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="trace-block">
+            <h4>创建角色与权限</h4>
+            <label>
+              角色名
+              <input value={roleName} onChange={(event) => setRoleName(event.target.value)} placeholder="analyst" />
+            </label>
+            <div className="action-row">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() =>
+                  runAdminAction('创建角色', () =>
+                    apiPost(apiBase, '/api/v1/admin/roles', {
+                      name: roleName.trim(),
+                    }),
+                  )
+                }
+                disabled={running}
+              >
+                创建角色
+              </button>
+            </div>
+            <label>
+              权限码
+              <input
+                value={permissionCode}
+                onChange={(event) => setPermissionCode(event.target.value)}
+                placeholder="kb:export"
+              />
+            </label>
+            <label>
+              权限描述
+              <input
+                value={permissionDescription}
+                onChange={(event) => setPermissionDescription(event.target.value)}
+                placeholder="Allow exporting indexed chunks"
+              />
+            </label>
+            <div className="action-row">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() =>
+                  runAdminAction('创建权限', () =>
+                    apiPost(apiBase, '/api/v1/admin/permissions', {
+                      code: permissionCode.trim(),
+                      description: permissionDescription.trim(),
+                    }),
+                  )
+                }
+                disabled={running}
+              >
+                创建权限
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <div className="trace-grid">
+          <section className="trace-block">
+            <h4>角色授权权限</h4>
+            <label>
+              角色名
+              <input
+                value={bindRoleName}
+                onChange={(event) => setBindRoleName(event.target.value)}
+                placeholder="analyst"
+              />
+            </label>
+            <label>
+              权限码
+              <input
+                value={bindPermissionCode}
+                onChange={(event) => setBindPermissionCode(event.target.value)}
+                placeholder="kb:export"
+              />
+            </label>
+            <div className="action-row">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() =>
+                  runAdminAction('绑定权限到角色', () =>
+                    apiPost(
+                      apiBase,
+                      `/api/v1/admin/roles/${encodeURIComponent(bindRoleName.trim())}/permissions/${encodeURIComponent(bindPermissionCode.trim())}`,
+                      {},
+                    ),
+                  )
+                }
+                disabled={running}
+              >
+                绑定权限到角色
+              </button>
+            </div>
+          </section>
+
+          <section className="trace-block">
+            <h4>分配角色给用户</h4>
+            <label>
+              用户 ID
+              <input
+                value={assignUserId}
+                onChange={(event) => setAssignUserId(event.target.value)}
+                placeholder="alice"
+              />
+            </label>
+            <label>
+              角色名
+              <input
+                value={assignRoleName}
+                onChange={(event) => setAssignRoleName(event.target.value)}
+                placeholder="analyst"
+              />
+            </label>
+            <div className="action-row">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() =>
+                  runAdminAction('分配角色给用户', () =>
+                    apiPost(
+                      apiBase,
+                      `/api/v1/admin/users/${encodeURIComponent(assignUserId.trim())}/roles/${encodeURIComponent(assignRoleName.trim())}`,
+                      {},
+                    ),
+                  )
+                }
+                disabled={running}
+              >
+                分配角色
+              </button>
+            </div>
+          </section>
+        </div>
+        {adminNotice && <p className="notice">{adminNotice}</p>}
+        {adminError && <p className="error">{adminError}</p>}
+        {!!adminResult && <pre>{JSON.stringify(adminResult, null, 2)}</pre>}
+      </section>
+
+      <section className="workflow">
+        <h2>会话历史</h2>
+        <div className="trace-grid">
+          <section className="trace-block">
+            <h4>会话列表</h4>
+            <label>
+              user_id
+              <input
+                value={sessionUserId}
+                onChange={(event) => setSessionUserId(event.target.value)}
+                placeholder="admin"
+              />
+            </label>
+            <label>
+              会话上限
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={sessionLimit}
+                onChange={(event) => setSessionLimit(Number(event.target.value) || 20)}
+              />
+            </label>
+            <div className="action-row">
+              <button type="button" className="ghost" onClick={() => refreshSessions()} disabled={running}>
+                拉取会话
+              </button>
+            </div>
+            {!sessions.length && <p className="muted">暂无会话</p>}
+            {!!sessions.length && (
+              <ul className="compact-list">
+                {sessions.map((item) => (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      className={`history-item-btn ${selectedSessionId === item.id ? 'is-active' : ''}`}
+                      onClick={() => {
+                        setSelectedSessionId(item.id);
+                        refreshSessionMessages(item.id, messageLimit);
+                      }}
+                    >
+                      <span>{item.title || item.id}</span>
+                      <small>{formatDateTime(item.created_at)}</small>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="trace-block">
+            <h4>会话消息</h4>
+            <label>
+              消息上限
+              <input
+                type="number"
+                min={1}
+                max={500}
+                value={messageLimit}
+                onChange={(event) => setMessageLimit(Number(event.target.value) || 100)}
+              />
+            </label>
+            <div className="action-row">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => refreshSessionMessages()}
+                disabled={running || !selectedSessionId}
+              >
+                拉取消息
+              </button>
+            </div>
+            {!selectedSessionId && <p className="muted">请先选择会话</p>}
+            {!!selectedSessionId && !sessionMessages.length && <p className="muted">该会话暂无消息</p>}
+            {!!sessionMessages.length && (
+              <ul className="message-list">
+                {sessionMessages.map((item) => (
+                  <li key={item.id}>
+                    <div className="message-head">
+                      <strong>{item.role || '-'}</strong>
+                      <small>{formatDateTime(item.created_at)}</small>
+                    </div>
+                    <pre>{item.content || ''}</pre>
+                    {!!item.citations && <pre>{JSON.stringify(item.citations, null, 2)}</pre>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+        {chatHint && <p className="notice">{chatHint}</p>}
+        {chatError && <p className="error">{chatError}</p>}
+      </section>
+
+      <section className="workflow">
         <h2>流程可视化（输入 / 输出）</h2>
         <div className="step-grid">
           {steps.map((step) => (
@@ -1165,6 +1998,8 @@ export default function App() {
         <ChunkDetailPanel chunk={activeChunk} onClose={() => setActiveChunk(null)} />
         <LlmInputPanel llmInput={llmInput} />
       </section>
+        </>
+      )}
     </div>
   );
 }
