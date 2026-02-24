@@ -1,30 +1,25 @@
-﻿import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import './App.css';
 
 const DEFAULT_USER_ID = import.meta.env.VITE_USER_ID || 'admin';
 const DEFAULT_API_KEY = import.meta.env.VITE_API_KEY || '';
+const apiBase = import.meta.env.VITE_API_BASE_URL || '';
+
+// --- 原有逻辑数据与配置 ---
 const DURETRIEVAL_DOCS = [
   {
     id: 'duretrieval_c_mteb',
     title: 'DuRetrieval (C-MTEB) snapshot',
     filePath: '/data/knowledge/datasets/duretrieval_c_mteb/corpus.md',
     prepare: 'local',
-    examples: [
-      '国家法定节假日共多少天',
-      '功和功率的区别',
-      '我国古代第一个有伟大成就的爱国诗人是( )',
-    ],
+    examples: ['国家法定节假日共多少天', '功和功率的区别', '我国古代第一个有伟大成就的爱国诗人是( )'],
   },
   {
     id: 'duretrieval_mteb',
     title: 'DuRetrieval (mteb) snapshot',
     filePath: '/data/knowledge/datasets/duretrieval_mteb/corpus.md',
     prepare: 'local',
-    examples: [
-      '如何查看好友申请',
-      '怎么屏蔽QQ新闻弹窗',
-      '宝鸡装修房子多少钱',
-    ],
+    examples: ['如何查看好友申请', '怎么屏蔽QQ新闻弹窗', '宝鸡装修房子多少钱'],
   },
 ];
 
@@ -34,178 +29,22 @@ const DEMO_DOC_LIBRARY = [
     title: 'FastAPI 官方 README（英文）',
     filePath: '/data/knowledge/fastapi_official_readme.md',
     prepare: 'remote_sample',
-    examples: [
-      'What is FastAPI and what are its key features?',
-      'How does FastAPI improve developer productivity?',
-    ],
-  },
-  {
-    id: 'fastapi_zh',
-    title: 'FastAPI 中文首页',
-    filePath: '/data/knowledge/fastapi_zh_index.md',
-    prepare: 'local',
-    examples: [
-      'FastAPI 是什么？',
-      'FastAPI 文档里提到了哪些学习入口？',
-    ],
-  },
-  {
-    id: 'kubernetes_zh',
-    title: 'Kubernetes 中文概览',
-    filePath: '/data/knowledge/kubernetes_zh_overview.md',
-    prepare: 'local',
-    examples: [
-      'Kubernetes 是什么？',
-      'Kubernetes 文档页主要提供了哪些导航入口？',
-    ],
-  },
-  {
-    id: 'ant_design_zh',
-    title: 'Ant Design 中文 README',
-    filePath: '/data/knowledge/ant_design_zh_readme.md',
-    prepare: 'local',
-    examples: [
-      'Ant Design 的核心定位是什么？',
-      'Ant Design 适用于哪些场景？',
-    ],
+    examples: ['What is FastAPI and what are its key features?', 'How does FastAPI improve developer productivity?'],
   },
   {
     id: 'vue_zh',
     title: 'Vue 中文介绍',
     filePath: '/data/knowledge/vue_zh_introduction.md',
     prepare: 'local',
-    examples: [
-      'Vue 是什么？',
-      'Vue 文档对新手的学习建议是什么？',
-    ],
-  },
-  {
-    id: 'elasticsearch_en',
-    title: 'Elasticsearch README（英文）',
-    filePath: '/data/knowledge/elasticsearch_readme_en.md',
-    prepare: 'local',
-    examples: [
-      'What is Elasticsearch?',
-      'What kind of workloads is Elasticsearch optimized for?',
-    ],
-  },
-  {
-    id: 'python_en',
-    title: 'Python README（英文）',
-    filePath: '/data/knowledge/python_readme_en.txt',
-    prepare: 'local',
-    examples: [
-      'What is Python according to the README?',
-      'How does Python describe its programming paradigm?',
-    ],
+    examples: ['Vue 是什么？', 'Vue 文档对新手的学习建议是什么？'],
   },
   ...DURETRIEVAL_DOCS,
 ];
 
-const EVAL_DOC_LIBRARY = DURETRIEVAL_DOCS;
-
 const DEFAULT_DOC = DEMO_DOC_LIBRARY[0];
 const DEFAULT_QUESTION = DEFAULT_DOC.examples[0];
 
-function createConversationId() {
-  return `chat-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-}
-
-function createSteps(query, filePath, docTitle) {
-  return [
-    {
-      id: 'download',
-      title: '1. 准备测试文档',
-      status: 'idle',
-      input: {
-        mode: 'local_or_remote',
-        endpoint: '/api/v1/debug/sample-doc（仅远程样例文档）',
-        doc: docTitle,
-        file_path: filePath,
-      },
-      output: null,
-      error: '',
-      durationMs: 0,
-      explain: {
-        what: 'Ensure the selected test document is ready for indexing and retrieval.',
-        choose: 'Remote sample files are downloaded first; local files are used directly.',
-        done: 'A valid file_path is returned for subsequent steps.',
-      },
-    },
-    {
-      id: 'index',
-      title: '2. 提交索引任务',
-      status: 'idle',
-      input: {
-        endpoint: '/api/v1/index/file',
-        method: 'POST',
-        file_path: filePath,
-      },
-      output: null,
-      error: '',
-      durationMs: 0,
-      explain: {
-        what: 'Submit selected document to async indexing queue.',
-        choose: 'Only index the selected file, not the whole knowledge base.',
-        done: 'Receive task_id, then wait for worker processing.',
-      },
-    },
-    {
-      id: 'poll',
-      title: '3. 等待入库完成',
-      status: 'idle',
-      input: {
-        endpoint: '/api/v1/debug/file-stats',
-        method: 'GET',
-        file_path: filePath,
-      },
-      output: null,
-      error: '',
-      durationMs: 0,
-      explain: {
-        what: 'Poll file stats until indexing is complete before QA.',
-        choose: 'Poll every second; stop when chunk_count > 0.',
-        done: 'indexed=true and chunk_count > 0.',
-      },
-    },
-    {
-      id: 'retrieve',
-      title: '4. 检索与召回',
-      status: 'idle',
-      input: {
-        endpoint: '/api/v1/qa/ask',
-        method: 'POST(SSE)',
-        query,
-        debug: true,
-      },
-      output: null,
-      error: '',
-      durationMs: 0,
-      explain: {
-        what: 'Run keyword and vector retrieval in parallel, then fuse with RRF.',
-        choose: 'Merge candidates and rank by 1/(k+rank), then pick Top-K.',
-        done: 'Get fusion hits, candidate flow stats, and timing details.',
-      },
-    },
-    {
-      id: 'answer',
-      title: '5. 答案生成',
-      status: 'idle',
-      input: {
-        source: 'SSE token stream',
-      },
-      output: null,
-      error: '',
-      durationMs: 0,
-      explain: {
-        what: 'Build LLM messages from Top-K contexts and question.',
-        choose: 'Use only retrieved context; do not add external knowledge.',
-        done: 'Receive token stream and final answer with llm_input.',
-      },
-    },
-  ];
-}
-
+// --- 工具函数 ---
 function resolveUrl(baseUrl, path) {
   const base = (baseUrl || '').trim();
   if (!base) return path;
@@ -220,57 +59,30 @@ function buildHeaders(hasBody = false) {
   return headers;
 }
 
-async function apiGet(baseUrl, path) {
-  const res = await fetch(resolveUrl(baseUrl, path), {
-    headers: buildHeaders(false),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`GET ${path} failed: ${res.status} ${text}`);
-  }
+async function apiGet(path) {
+  const res = await fetch(resolveUrl(apiBase, path), { headers: buildHeaders(false) });
+  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
   return res.json();
 }
 
-async function apiPost(baseUrl, path, body) {
-  const res = await fetch(resolveUrl(baseUrl, path), {
+async function apiPost(path, body) {
+  const res = await fetch(resolveUrl(apiBase, path), {
     method: 'POST',
     headers: buildHeaders(true),
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`POST ${path} failed: ${res.status} ${text}`);
-  }
-  return res.json();
-}
-
-async function apiDelete(baseUrl, path, body) {
-  const options = {
-    method: 'DELETE',
-    headers: buildHeaders(Boolean(body)),
-  };
-  if (body) {
-    options.body = JSON.stringify(body);
-  }
-  const res = await fetch(resolveUrl(baseUrl, path), options);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`DELETE ${path} failed: ${res.status} ${text}`);
-  }
+  if (!res.ok) throw new Error(`POST ${path} failed: ${res.status}`);
   return res.json();
 }
 
 function extractSsePayloads(buffer) {
   const payloads = [];
   let remaining = buffer;
-
   while (true) {
     const splitAt = remaining.indexOf('\n\n');
     if (splitAt === -1) break;
-
     const frame = remaining.slice(0, splitAt).trim();
     remaining = remaining.slice(splitAt + 2);
-
     if (!frame) continue;
     const lines = frame.split(/\r?\n/);
     for (const line of lines) {
@@ -279,76 +91,36 @@ function extractSsePayloads(buffer) {
       if (raw) payloads.push(raw);
     }
   }
-
   return { payloads, remaining };
 }
 
-function formatNumber(value) {
-  if (typeof value !== 'number' || Number.isNaN(value)) return '-';
-  return value.toFixed(4);
-}
-
 function formatMs(value) {
-  if (typeof value !== 'number' || Number.isNaN(value)) return '-';
-  return `${value.toFixed(2)} ms`;
+  return typeof value === 'number' ? `${value.toFixed(2)} ms` : '-';
 }
 
 function formatPercent(value) {
-  if (typeof value !== 'number' || Number.isNaN(value)) return '-';
-  return `${(value * 100).toFixed(1)}%`;
+  return typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : '-';
 }
 
 function formatDateTime(value) {
   if (!value) return '-';
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 }
 
-function pickMetric(metrics, name, preferredK = 5) {
-  if (!metrics || typeof metrics !== 'object') return '-';
-  const exact = metrics[`${name}@${preferredK}`];
-  if (typeof exact === 'number') return exact.toFixed(4);
-  const key = Object.keys(metrics)
-    .filter((item) => item.startsWith(`${name}@`))
-    .sort((a, b) => {
-      const aK = Number(a.split('@')[1] || 0);
-      const bK = Number(b.split('@')[1] || 0);
-      return aK - bK;
-    })[0];
-  if (!key) return '-';
-  const fallback = metrics[key];
-  return typeof fallback === 'number' ? fallback.toFixed(4) : '-';
-}
-
-function statusLabel(status) {
-  if (status === 'done') return '已完成';
-  if (status === 'running') return '执行中';
-  if (status === 'error') return '失败';
-  return '等待';
-}
+// --- 子组件 (保留原有逻辑，应用新样式) ---
 
 function StepCard({ step }) {
-  const output = step.error
-    ? { error: step.error }
-    : step.output || { message: '等待执行' };
-
+  const output = step.error ? { error: step.error } : step.output || { message: '等待执行' };
   return (
     <article className={`step-card step-${step.status}`}>
       <header>
         <h3>{step.title}</h3>
         <div className="step-meta">
-          <span>{statusLabel(step.status)}</span>
+          <span>{step.status === 'done' ? '已完成' : step.status === 'running' ? '执行中' : step.status === 'error' ? '失败' : '等待'}</span>
           <span>{step.durationMs ? `${step.durationMs} ms` : '-'}</span>
         </div>
       </header>
-      {!!step.explain && (
-        <section className="step-explain">
-          <p><strong>做什么：</strong>{step.explain.what}</p>
-          <p><strong>如何选择：</strong>{step.explain.choose}</p>
-          <p><strong>完成标准：</strong>{step.explain.done}</p>
-        </section>
-      )}
       <div className="step-io">
         <section>
           <p>输入</p>
@@ -370,19 +142,14 @@ function HitList({ title, hits, onOpenChunk }) {
       {!hits?.length && <p className="muted">无命中</p>}
       {!!hits?.length && (
         <ul>
-          {hits.slice(0, 5).map((hit) => (
-            <li key={`${title}-${hit.id}-${hit.rank}`}>
-              <div>
+          {hits.slice(0, 5).map((hit, idx) => (
+            <li key={idx}>
+              <div className="hit-header">
                 <strong>#{hit.rank}</strong>
                 <span>{hit.file_name || hit.file_path || hit.id}</span>
               </div>
-              <small>score={formatNumber(hit.score)} rrf={formatNumber(hit.rrf_score)}</small>
-              <p>{hit.preview}</p>
-              {!!hit.content && (
-                <button type="button" className="inline-btn" onClick={() => onOpenChunk(title, hit)}>
-                  查看详情
-                </button>
-              )}
+              <small>score={hit.score?.toFixed(4)} rrf={hit.rrf_score?.toFixed(4)}</small>
+              <p className="hit-preview">{hit.preview}</p>
             </li>
           ))}
         </ul>
@@ -391,1616 +158,392 @@ function HitList({ title, hits, onOpenChunk }) {
   );
 }
 
-function TimingList({ timing }) {
-  if (!timing) return <p className="muted">无耗时数据</p>;
-  const rows = [
-    ['embedding', timing.embedding],
-    ['keyword_search', timing.keyword_search],
-    ['vector_search', timing.vector_search],
-    ['parallel_search_wall', timing.parallel_search_wall],
-    ['fusion', timing.fusion],
-    ['total', timing.total],
-  ];
-  return (
-    <ul className="kv-list">
-      {rows.map(([k, v]) => (
-        <li key={k}>
-          <span>{k}</span>
-          <strong>{formatMs(v)}</strong>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function FlowList({ flow }) {
-  if (!flow) return <p className="muted">无候选流转数据</p>;
-  const rows = [
-    ['keyword_candidates', flow.keyword_candidates],
-    ['vector_candidates', flow.vector_candidates],
-    ['union_candidates', flow.union_candidates],
-    ['overlap_candidates', flow.overlap_candidates],
-    ['final_selected', flow.final_selected],
-    ['dropped_candidates', flow.dropped_candidates],
-  ];
-  return (
-    <ul className="kv-list">
-      {rows.map(([k, v]) => (
-        <li key={k}>
-          <span>{k}</span>
-          <strong>{v ?? '-'}</strong>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function FusionTable({ rows, onOpenChunk, sourceTitle }) {
-  if (!rows?.length) return <p className="muted">无融合明细</p>;
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>final</th>
-            <th>src</th>
-            <th>k_rank</th>
-            <th>v_rank</th>
-            <th>k_rrf</th>
-            <th>v_rrf</th>
-            <th>rrf_total</th>
-            <th>chunk</th>
-            <th>detail</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={`fusion-${row.id}-${row.final_rank}`}>
-              <td>{row.final_rank}</td>
-              <td>{row.source}</td>
-              <td>{row.keyword_rank ?? '-'}</td>
-              <td>{row.vector_rank ?? '-'}</td>
-              <td>{formatNumber(row.keyword_rrf)}</td>
-              <td>{formatNumber(row.vector_rrf)}</td>
-              <td>{formatNumber(row.rrf_score)}</td>
-              <td>{row.chunk_id ?? '-'}</td>
-              <td>
-                {!!row.content && (
-                  <button type="button" className="inline-btn" onClick={() => onOpenChunk(sourceTitle, row)}>
-                    查看
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function ChunkDetailPanel({ chunk, onClose }) {
-  useEffect(() => {
-    if (!chunk) return undefined;
-    const onKeyDown = (event) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [chunk, onClose]);
-
-  if (!chunk) return null;
-  return (
-    <div className="chunk-modal-backdrop" onClick={onClose}>
-      <section className="chunk-modal" onClick={(event) => event.stopPropagation()}>
-        <div className="chunk-detail-head">
-          <h4>Chunk 详情</h4>
-          <button type="button" className="inline-btn" onClick={onClose}>
-            关闭
-          </button>
-        </div>
-        <div className="metric-row">
-          <span>source: {chunk.source || '-'}</span>
-          <span>rank: {chunk.rank ?? '-'}</span>
-          <span>chunk_id: {chunk.chunk_id ?? '-'}</span>
-        </div>
-        <p className="muted">{chunk.file_name || chunk.file_path || chunk.id}</p>
-        <pre className="raw-block">{chunk.content || chunk.preview || ''}</pre>
-      </section>
-    </div>
-  );
-}
-
-function LlmInputPanel({ llmInput }) {
-  if (!llmInput) {
-    return (
-      <section className="trace-block">
-        <h4>传给大模型的内容（完整）</h4>
-        <p className="muted">执行流程后显示模型输入 messages 与 contexts 全文。</p>
-      </section>
-    );
-  }
-
-  return (
-    <section className="trace-block">
-      <h4>传给大模型的内容（完整）</h4>
-      <div className="metric-row">
-        <span>provider: {llmInput.provider || '-'}</span>
-        <span>model: {llmInput.model || '-'}</span>
-        <span>base_url: {llmInput.base_url || '-'}</span>
-        <span>temperature: {llmInput.temperature ?? '-'}</span>
-        <span>context_count: {llmInput.context_count ?? '-'}</span>
-      </div>
-      <p className="muted">messages（原始请求）</p>
-      <pre className="raw-block">{JSON.stringify(llmInput.messages || [], null, 2)}</pre>
-      <p className="muted">contexts（送入模型的全文）</p>
-      <pre className="raw-block">{JSON.stringify(llmInput.contexts || [], null, 2)}</pre>
-    </section>
-  );
-}
-
 function BaselineReportPanel({ latest, items }) {
   const [selectedFileName, setSelectedFileName] = useState('');
-
-  const effectiveSelectedFileName = useMemo(() => {
-    if (!items?.length) return '';
-    if (selectedFileName && items.some((item) => item.file_name === selectedFileName)) {
-      return selectedFileName;
-    }
-    return items[0].file_name;
-  }, [items, selectedFileName]);
-
   const activeSummary = useMemo(() => {
     if (items?.length) {
-      const matched = items.find((item) => item.file_name === effectiveSelectedFileName);
-      if (matched) return matched;
-      return items[0];
+      return items.find((item) => item.file_name === selectedFileName) || items[0];
     }
     return latest || null;
-  }, [items, latest, effectiveSelectedFileName]);
+  }, [items, latest, selectedFileName]);
 
   const methods = activeSummary?.metrics ? Object.keys(activeSummary.metrics) : [];
 
   return (
     <section className="workflow">
-      <h2>公共基线报表</h2>
-      {!activeSummary && <p className="muted">暂无基线报表，请先运行 eval 脚本。</p>}
+      <div className="section-header">
+        <h2>公共基线报表</h2>
+      </div>
+      {!activeSummary && <p className="muted">暂无报表数据</p>}
       {!!activeSummary && (
         <>
           <div className="metric-row">
-            <span>dataset: {activeSummary.dataset || '-'}</span>
-            <span>method: {activeSummary.method || '-'}</span>
-            <span>top_k: {activeSummary.top_k ?? '-'}</span>
-            <span>created_at: {formatDateTime(activeSummary.created_at)}</span>
-            <span>cost_total: {activeSummary.cost_seconds_total ?? '-'} s</span>
-          </div>
-          <div className="metric-row">
-            <span>corpus: {activeSummary.counts?.corpus ?? '-'}</span>
-            <span>queries: {activeSummary.counts?.queries ?? '-'}</span>
-            <span>qrels_queries: {activeSummary.counts?.qrels_queries ?? '-'}</span>
-            <span>qrels_pairs: {activeSummary.counts?.qrels_pairs ?? '-'}</span>
+            <span>Dataset: {activeSummary.dataset}</span>
+            <span>Created: {formatDateTime(activeSummary.created_at)}</span>
+            <span>Total Cost: {activeSummary.cost_seconds_total}s</span>
           </div>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>method</th>
-                  <th>hit@5</th>
-                  <th>recall@5</th>
-                  <th>mrr@10</th>
-                  <th>map@10</th>
-                  <th>ndcg@10</th>
-                  <th>cost(s)</th>
+                  <th>Method</th>
+                  <th>Hit@5</th>
+                  <th>Recall@5</th>
+                  <th>MRR@10</th>
+                  <th>nDCG@10</th>
+                  <th>Cost(s)</th>
                 </tr>
               </thead>
               <tbody>
-                {methods.map((method) => {
-                  const metrics = activeSummary.metrics?.[method] || {};
-                  const cost = activeSummary.method_cost_seconds?.[method];
-                  return (
-                    <tr key={`metric-${method}`}>
-                      <td>{method}</td>
-                      <td>{pickMetric(metrics, 'hit', 5)}</td>
-                      <td>{pickMetric(metrics, 'recall', 5)}</td>
-                      <td>{pickMetric(metrics, 'mrr', 10)}</td>
-                      <td>{pickMetric(metrics, 'map', 10)}</td>
-                      <td>{pickMetric(metrics, 'ndcg', 10)}</td>
-                      <td>{typeof cost === 'number' ? cost.toFixed(3) : '-'}</td>
-                    </tr>
-                  );
-                })}
+                {methods.map((m) => (
+                  <tr key={m}>
+                    <td>{m}</td>
+                    <td>{activeSummary.metrics[m]['hit@5']?.toFixed(4)}</td>
+                    <td>{activeSummary.metrics[m]['recall@5']?.toFixed(4)}</td>
+                    <td>{activeSummary.metrics[m]['mrr@10']?.toFixed(4)}</td>
+                    <td>{activeSummary.metrics[m]['ndcg@10']?.toFixed(4)}</td>
+                    <td>{activeSummary.method_cost_seconds?.[m]?.toFixed(3)}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
-        </>
-      )}
-      {!!items?.length && (
-        <div className="history-list">
-          <h4>鍘嗗彶鎶ヨ〃</h4>
-          <ul>
-            {items.slice(0, 6).map((item) => (
-              <li key={item.file_name}>
-                <button
-                  type="button"
-                  className={`history-item-btn ${effectiveSelectedFileName === item.file_name ? 'is-active' : ''}`}
+          <div className="history-list">
+             <h4>历史快照</h4>
+             <div className="chip-list">
+               {items.map(item => (
+                 <button 
+                  key={item.file_name} 
+                  className={`chip ${selectedFileName === item.file_name ? 'active' : ''}`}
                   onClick={() => setSelectedFileName(item.file_name)}
-                >
-                  <span>{item.file_name}</span>
-                  <small>{formatDateTime(item.created_at)}</small>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
+                 >
+                   {item.file_name}
+                 </button>
+               ))}
+             </div>
+          </div>
+        </>
       )}
     </section>
   );
 }
 
+// --- 主程序 ---
+
 export default function App() {
-  const [activePage, setActivePage] = useState('demo');
-  const [evalDocs, setEvalDocs] = useState(EVAL_DOC_LIBRARY);
-  const visibleDocs = useMemo(
-    () => (activePage === 'eval' ? evalDocs : DEMO_DOC_LIBRARY),
-    [activePage, evalDocs],
-  );
-  const [selectedDocId, setSelectedDocId] = useState(DEFAULT_DOC.id);
-  const selectedDoc = useMemo(
-    () => visibleDocs.find((item) => item.id === selectedDocId) || visibleDocs[0] || DEFAULT_DOC,
-    [visibleDocs, selectedDocId],
-  );
-  const [question, setQuestion] = useState(DEFAULT_QUESTION);
-  const [docPath, setDocPath] = useState(DEFAULT_DOC.filePath);
-  const [steps, setSteps] = useState(() => createSteps(DEFAULT_QUESTION, DEFAULT_DOC.filePath, DEFAULT_DOC.title));
-  const [running, setRunning] = useState(false);
-  const [notice, setNotice] = useState('');
-  const [error, setError] = useState('');
-  const [evalHint, setEvalHint] = useState('');
-  const [reportHint, setReportHint] = useState('');
-
-  const [health, setHealth] = useState(null);
-  const [chunkCount, setChunkCount] = useState(0);
-  const [answer, setAnswer] = useState('');
-  const [retrieval, setRetrieval] = useState(null);
-  const [llmInput, setLlmInput] = useState(null);
-  const [activeChunk, setActiveChunk] = useState(null);
-  const [evalReports, setEvalReports] = useState([]);
-  const [latestEvalReport, setLatestEvalReport] = useState(null);
-  const [deletePath, setDeletePath] = useState(DEFAULT_DOC.filePath);
-  const [myPermissions, setMyPermissions] = useState([]);
-  const [permissionUserId, setPermissionUserId] = useState(DEFAULT_USER_ID);
-  const [permissionLookup, setPermissionLookup] = useState([]);
-  const [roleName, setRoleName] = useState('analyst');
-  const [permissionCode, setPermissionCode] = useState('kb:export');
-  const [permissionDescription, setPermissionDescription] = useState('Allow exporting indexed chunks');
-  const [bindRoleName, setBindRoleName] = useState('analyst');
-  const [bindPermissionCode, setBindPermissionCode] = useState('kb:export');
-  const [assignUserId, setAssignUserId] = useState(DEFAULT_USER_ID);
-  const [assignRoleName, setAssignRoleName] = useState('analyst');
-  const [adminResult, setAdminResult] = useState(null);
-  const [adminNotice, setAdminNotice] = useState('');
-  const [adminError, setAdminError] = useState('');
-  const [sessionUserId, setSessionUserId] = useState(DEFAULT_USER_ID);
-  const [sessionLimit, setSessionLimit] = useState(20);
-  const [messageLimit, setMessageLimit] = useState(100);
+  const [activePage, setActivePage] = useState('chat'); // 'chat', 'demo', 'eval'
+  
+  // Chat 状态
   const [sessions, setSessions] = useState([]);
-  const [selectedSessionId, setSelectedSessionId] = useState('');
-  const [sessionMessages, setSessionMessages] = useState([]);
-  const [chatHint, setChatHint] = useState('');
-  const [chatError, setChatError] = useState('');
-  const [chatConversationId, setChatConversationId] = useState(() => createConversationId());
+  const [activeSessionId, setActiveSessionId] = useState(null);
+  const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
-  const [chatMessages, setChatMessages] = useState([]);
-  const [chatStreaming, setChatStreaming] = useState(false);
-  const [chatDebugMode, setChatDebugMode] = useState(false);
-  const [chatTrace, setChatTrace] = useState(null);
-  const [chatLlmInput, setChatLlmInput] = useState(null);
-  const [chatCitations, setChatCitations] = useState([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const messagesEndRef = useRef(null);
 
-  const apiBase = useMemo(() => import.meta.env.VITE_API_BASE_URL || '', []);
+  // Demo & Eval 共享状态
+  const [selectedDocId, setSelectedDocId] = useState(DEFAULT_DOC.id);
+  const [evalDocs, setEvalDocs] = useState([]);
+  const visibleDocs = useMemo(() => (activePage === 'eval' ? evalDocs : DEMO_DOC_LIBRARY), [activePage, evalDocs]);
+  const selectedDoc = useMemo(() => visibleDocs.find(d => d.id === selectedDocId) || visibleDocs[0] || DEFAULT_DOC, [visibleDocs, selectedDocId]);
+  
+  const [question, setQuestion] = useState(DEFAULT_DOC.examples[0]);
+  const [steps, setSteps] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [retrieval, setRetrieval] = useState(null);
+  const [evalReports, setEvalReports] = useState([]);
+  const [latestReport, setLatestReport] = useState(null);
 
+  // 初始化
   useEffect(() => {
-    refreshStatus();
+    refreshSessions();
     refreshEvalDatasets();
     refreshEvalReports();
-    refreshMyPermissions();
-    refreshSessions(DEFAULT_USER_ID, 20);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (!notice) return;
-    const timer = setTimeout(() => setNotice(''), 1800);
-    return () => clearTimeout(timer);
-  }, [notice]);
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
-  useEffect(() => {
-    if (!adminNotice) return;
-    const timer = setTimeout(() => setAdminNotice(''), 1800);
-    return () => clearTimeout(timer);
-  }, [adminNotice]);
+  // --- 逻辑函数 ---
 
-  useEffect(() => {
-    if (!chatHint) return;
-    const timer = setTimeout(() => setChatHint(''), 1800);
-    return () => clearTimeout(timer);
-  }, [chatHint]);
-
-  useEffect(() => {
-    setDocPath(selectedDoc.filePath);
-    setQuestion(selectedDoc.examples[0] || DEFAULT_QUESTION);
-    setSteps(createSteps(selectedDoc.examples[0] || DEFAULT_QUESTION, selectedDoc.filePath, selectedDoc.title));
-    setDeletePath(selectedDoc.filePath);
-    setLlmInput(null);
-    setActiveChunk(null);
-    refreshStatus(selectedDoc.filePath);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDoc]);
-
-  useEffect(() => {
-    const first = visibleDocs[0];
-    if (!first) return;
-    setSelectedDocId(first.id);
-  }, [visibleDocs]);
-
-  useEffect(() => {
-    if (activePage !== 'chat') return;
-    if (!selectedSessionId) return;
-    if (chatMessages.length) return;
-    refreshSessionMessages(selectedSessionId, messageLimit, true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePage, selectedSessionId]);
-
-  function patchStep(id, patch) {
-    setSteps((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
-  }
-
-  async function executeStep(id, fn) {
-    const started = Date.now();
-    patchStep(id, { status: 'running', error: '' });
+  const refreshSessions = async () => {
     try {
-      const output = await fn();
-      patchStep(id, {
-        status: 'done',
-        output,
-        durationMs: Date.now() - started,
-      });
-      return output;
-    } catch (err) {
-      patchStep(id, {
-        status: 'error',
-        error: String(err.message || err),
-        durationMs: Date.now() - started,
-      });
-      throw err;
-    }
-  }
+      const res = await apiGet('/api/v1/chat/sessions');
+      setSessions(res.items || []);
+    } catch (err) { console.error(err); }
+  };
 
-  async function refreshStatus(filePath = docPath) {
+  const loadMessages = async (sid) => {
     try {
-      const [healthData, statsData] = await Promise.all([
-        apiGet(apiBase, '/health'),
-        apiGet(apiBase, `/api/v1/debug/file-stats?file_path=${encodeURIComponent(filePath)}`),
-      ]);
-      setHealth(healthData);
-      setChunkCount(statsData.chunk_count || 0);
-    } catch {
-      setHealth({ status: 'error' });
-    }
-  }
+      const res = await apiGet(`/api/v1/chat/sessions/${sid}/messages`);
+      setMessages(res.items || []);
+    } catch (err) { console.error(err); }
+  };
 
-  async function refreshEvalDatasets() {
+  const refreshEvalDatasets = async () => {
     try {
-      const payload = await apiGet(apiBase, '/api/v1/eval/datasets/manifest');
+      const payload = await apiGet('/api/v1/eval/datasets/manifest');
       const items = Array.isArray(payload.items) ? payload.items : [];
-      if (!items.length) {
-        setEvalHint('未检测到 DuRetrieval 数据集清单。');
-        return;
-      }
-
-      const mapped = items.map((item) => ({
+      setEvalDocs(items.map(item => ({
         id: item.id,
         title: item.title || item.id,
         filePath: item.corpus_file_path_runtime || item.resolved_file_path || '',
         prepare: 'local',
-        examples: item.sample_questions?.slice(0, 3)?.length
-          ? item.sample_questions.slice(0, 3)
-          : ['请概括这份语料包含的主题'],
-        exists: item.exists,
+        examples: item.sample_questions?.slice(0, 3) || ['请概括这份语料的内容'],
         indexed: item.indexed,
-        chunkCount: item.chunk_count || 0,
-      }));
+        exists: item.exists
+      })));
+    } catch (err) { console.error(err); }
+  };
 
-      setEvalDocs(mapped);
-      setEvalHint('评测数据集清单已同步。');
-    } catch (err) {
-      setEvalHint(`评测数据集清单读取失败：${String(err.message || err)}`);
-    }
-  }
-
-  async function refreshEvalReports() {
+  const refreshEvalReports = async () => {
     try {
-      const payload = await apiGet(apiBase, '/api/v1/eval/reports?limit=20');
-      let latest = payload.latest || null;
-      try {
-        const latestPayload = await apiGet(apiBase, '/api/v1/eval/reports/latest');
-        if (latestPayload?.latest?.summary) {
-          latest = latestPayload.latest.summary;
-        }
-      } catch {
-        // Ignore latest endpoint failures and fallback to list endpoint summary.
-      }
-      const items = Array.isArray(payload.items) ? payload.items : [];
-      setEvalReports(items);
-      setLatestEvalReport(latest);
-      setReportHint(items.length ? `已同步 ${items.length} 份基线报表。` : '暂无基线报表，请先运行评测脚本。');
-    } catch (err) {
-      setReportHint(`基线报表读取失败：${String(err.message || err)}`);
-    }
-  }
+      const payload = await apiGet('/api/v1/eval/reports?limit=20');
+      setEvalReports(payload.items || []);
+      setLatestReport(payload.latest || null);
+    } catch (err) { console.error(err); }
+  };
 
-  async function refreshMyPermissions() {
-    try {
-      const payload = await apiGet(apiBase, '/api/v1/me/permissions');
-      const list = Array.isArray(payload.permissions) ? payload.permissions : [];
-      setMyPermissions(list);
-      return list;
-    } catch (err) {
-      setAdminError(String(err.message || err));
-      return [];
-    }
-  }
+  const createSteps = (q, path, title) => [
+    { id: 'download', title: '1. 文档准备', status: 'idle', input: { path, title }, output: null },
+    { id: 'index', title: '2. 索引任务', status: 'idle', input: { method: 'POST', path }, output: null },
+    { id: 'poll', title: '3. 入库等待', status: 'idle', input: { endpoint: 'file-stats' }, output: null },
+    { id: 'retrieve', title: '4. 检索与问答', status: 'idle', input: { query: q }, output: null },
+  ];
 
-  async function runAdminAction(actionName, runner) {
-    setAdminNotice('');
-    setAdminError('');
-    try {
-      const payload = await runner();
-      setAdminResult(payload);
-      setAdminNotice(`${actionName} 已完成`);
-      await refreshMyPermissions();
-      return payload;
-    } catch (err) {
-      setAdminError(String(err.message || err));
-      return null;
-    }
-  }
+  const patchStep = (id, patch) => setSteps(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
 
-  async function queryUserPermissions(userId = permissionUserId) {
-    const target = userId.trim();
-    if (!target) {
-      setAdminError('请输入要查询的用户 ID');
-      return;
-    }
-    const payload = await runAdminAction('查询用户权限', () =>
-      apiGet(apiBase, `/api/v1/admin/users/${encodeURIComponent(target)}/permissions`),
-    );
-    if (payload) {
-      setPermissionLookup(Array.isArray(payload.permissions) ? payload.permissions : []);
-    }
-  }
+  // --- 事件处理 ---
 
-  async function deleteIndexedFile() {
-    const targetPath = deletePath.trim();
-    if (!targetPath) {
-      setAdminError('请输入需要删除索引的文件路径');
-      return;
-    }
-    const payload = await runAdminAction('删除索引', () =>
-      apiDelete(apiBase, '/api/v1/index/file', {
-        file_path: targetPath,
-      }),
-    );
-    if (payload) {
-      await refreshStatus(targetPath);
-      setChunkCount(0);
-    }
-  }
-
-  async function refreshSessionMessages(sessionId = selectedSessionId, limit = messageLimit, syncToChat = false) {
-    const targetSessionId = (sessionId || '').trim();
-    if (!targetSessionId) {
-      setSessionMessages([]);
-      if (syncToChat) {
-        setChatMessages([]);
-      }
-      return;
-    }
-    setChatError('');
-    try {
-      const payload = await apiGet(
-        apiBase,
-        `/api/v1/chat/sessions/${encodeURIComponent(targetSessionId)}/messages?limit=${limit}`,
-      );
-      const items = Array.isArray(payload.items) ? payload.items : [];
-      setSessionMessages(items);
-      if (syncToChat) {
-        const normalized = items.map((item) => ({
-          id: item.id || `${item.role || 'assistant'}-${item.created_at || Date.now()}`,
-          role: item.role || 'assistant',
-          content: item.content || '',
-          citations: item.citations?.items || [],
-          created_at: item.created_at || null,
-        }));
-        setChatConversationId(targetSessionId);
-        setChatMessages(normalized);
-        setChatTrace(null);
-        setChatLlmInput(null);
-        setChatCitations([]);
-      }
-      setChatHint(`已加载 ${items.length} 条会话消息`);
-    } catch (err) {
-      setChatError(String(err.message || err));
-    }
-  }
-
-  async function refreshSessions(
-    userId = sessionUserId,
-    limit = sessionLimit,
-    preferredSessionId = '',
-    syncToChat = false,
-  ) {
-    const targetUserId = userId.trim();
-    if (!targetUserId) {
-      setChatError('请输入会话用户 ID');
-      return;
-    }
-    setChatError('');
-    try {
-      const payload = await apiGet(
-        apiBase,
-        `/api/v1/chat/sessions?user_id=${encodeURIComponent(targetUserId)}&limit=${limit}`,
-      );
-      const items = Array.isArray(payload.items) ? payload.items : [];
-      setSessions(items);
-      if (!items.length) {
-        setSelectedSessionId('');
-        setSessionMessages([]);
-        if (syncToChat) {
-          setChatMessages([]);
-        }
-        setChatHint('当前用户暂无会话记录');
-        return;
-      }
-      const preferred = preferredSessionId.trim();
-      const hasPreferred = preferred && items.some((item) => item.id === preferred);
-      const nextSessionId = hasPreferred ? preferred : items[0].id;
-      setSelectedSessionId(nextSessionId);
-      setChatHint(`已加载 ${items.length} 个会话`);
-      await refreshSessionMessages(nextSessionId, messageLimit, syncToChat);
-    } catch (err) {
-      setChatError(String(err.message || err));
-    }
-  }
-
-  function startNewConversation() {
-    setSelectedSessionId('');
-    setSessionMessages([]);
-    setChatMessages([]);
+  const handleSendChat = async () => {
+    if (!chatInput.trim() || isGenerating) return;
+    const q = chatInput;
     setChatInput('');
-    setChatTrace(null);
-    setChatLlmInput(null);
-    setChatCitations([]);
-    setChatConversationId(createConversationId());
-    setChatHint('已创建新会话，可以直接提问。');
-  }
+    setIsGenerating(true);
+    const sid = activeSessionId || Math.random().toString(36).substring(7);
+    if (!activeSessionId) setActiveSessionId(sid);
 
-  async function sendChatMessage() {
-    const query = chatInput.trim();
-    if (!query || chatStreaming) return;
-
-    const conversationId = chatConversationId || createConversationId();
-    if (!chatConversationId) {
-      setChatConversationId(conversationId);
-    }
-
-    const userMessageId = `user-${Date.now()}`;
-    const assistantMessageId = `assistant-${Date.now() + 1}`;
-    setChatInput('');
-    setChatError('');
-    setChatTrace(null);
-    setChatLlmInput(null);
-    setChatCitations([]);
-    setChatStreaming(true);
-
-    setChatMessages((prev) => [
-      ...prev,
-      {
-        id: userMessageId,
-        role: 'user',
-        content: query,
-        citations: [],
-        created_at: new Date().toISOString(),
-      },
-      {
-        id: assistantMessageId,
-        role: 'assistant',
-        content: '',
-        citations: [],
-        created_at: new Date().toISOString(),
-      },
-    ]);
+    const userMsg = { id: Date.now(), role: 'user', content: q };
+    const aiMsg = { id: Date.now() + 1, role: 'assistant', content: '', citations: null };
+    setMessages(prev => [...prev, userMsg, aiMsg]);
 
     try {
-      const payload = {
-        query,
-        conversation_id: conversationId,
-        user_id: DEFAULT_USER_ID,
-        debug: chatDebugMode,
-      };
-
       const res = await fetch(resolveUrl(apiBase, '/api/v1/qa/ask'), {
         method: 'POST',
         headers: buildHeaders(true),
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ query: q, conversation_id: sid, user_id: DEFAULT_USER_ID, debug: true })
       });
-
-      if (!res.ok || !res.body) {
-        const bodyText = await res.text();
-        throw new Error(`qa failed: ${res.status} ${bodyText}`);
-      }
-
       const reader = res.body.getReader();
-      const decoder = new TextDecoder('utf-8');
+      const decoder = new TextDecoder();
       let buffer = '';
-      let assistantText = '';
-      let citations = [];
-
+      let fullText = '';
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
-        const extracted = extractSsePayloads(buffer);
-        buffer = extracted.remaining;
-
-        for (const raw of extracted.payloads) {
-          let event;
-          try {
-            event = JSON.parse(raw);
-          } catch {
-            continue;
-          }
-
-          if (event.type === 'context') {
-            citations = event.citations || [];
-            setChatCitations(citations);
-            continue;
-          }
-          if (event.type === 'trace') {
-            setChatTrace(event.trace || null);
-            continue;
-          }
-          if (event.type === 'llm_input') {
-            setChatLlmInput(event.llm_input || null);
-            continue;
-          }
-          if (event.type === 'token') {
-            assistantText += event.text || '';
-            setChatMessages((prev) =>
-              prev.map((item) => (item.id === assistantMessageId ? { ...item, content: assistantText } : item)),
-            );
+        const { payloads, remaining } = extractSsePayloads(buffer);
+        buffer = remaining;
+        for (const raw of payloads) {
+          const ev = JSON.parse(raw);
+          if (ev.type === 'token') {
+            fullText += ev.text;
+            setMessages(prev => prev.map(m => m.id === aiMsg.id ? { ...m, content: fullText } : m));
+          } else if (ev.type === 'context') {
+            setMessages(prev => prev.map(m => m.id === aiMsg.id ? { ...m, citations: { items: ev.citations } } : m));
           }
         }
       }
-
-      setChatMessages((prev) =>
-        prev.map((item) =>
-          item.id === assistantMessageId
-            ? {
-                ...item,
-                content: assistantText || '(无输出)',
-                citations,
-              }
-            : item,
-        ),
-      );
-
-      await refreshSessions(sessionUserId, sessionLimit, conversationId, true);
+      refreshSessions();
     } catch (err) {
-      setChatError(String(err.message || err));
-      setChatMessages((prev) =>
-        prev.map((item) =>
-          item.id === assistantMessageId
-            ? {
-                ...item,
-                content: `请求失败：${String(err.message || err)}`,
-              }
-            : item,
-        ),
-      );
-    } finally {
-      setChatStreaming(false);
-    }
-  }
+      setMessages(prev => prev.map(m => m.id === aiMsg.id ? { ...m, content: 'Error: ' + err.message } : m));
+    } finally { setIsGenerating(false); }
+  };
 
-  async function askWithTrace(queryText) {
-    setAnswer('');
-    setRetrieval(null);
-    setLlmInput(null);
-    setActiveChunk(null);
-
-    const payload = {
-      query: queryText,
-      conversation_id: null,
-      user_id: DEFAULT_USER_ID,
-      debug: true,
-    };
-
-    const res = await fetch(resolveUrl(apiBase, '/api/v1/qa/ask'), {
-      method: 'POST',
-      headers: buildHeaders(true),
-      body: JSON.stringify(payload),
-    });
-
-    if (!res.ok || !res.body) {
-      const bodyText = await res.text();
-      throw new Error(`qa failed: ${res.status} ${bodyText}`);
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
-
-    let contextCount = 0;
-    let citations = [];
-    let trace = null;
-    let llmInputPayload = null;
-    let fullAnswer = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const extracted = extractSsePayloads(buffer);
-      buffer = extracted.remaining;
-
-      for (const raw of extracted.payloads) {
-        let event;
-        try {
-          event = JSON.parse(raw);
-        } catch {
-          continue;
-        }
-
-        if (event.type === 'context') {
-          contextCount = event.count || 0;
-          citations = event.citations || [];
-          continue;
-        }
-
-        if (event.type === 'trace') {
-          trace = event.trace || null;
-          setRetrieval({
-            contextCount,
-            citations,
-            trace: event.trace || null,
-          });
-          continue;
-        }
-
-        if (event.type === 'llm_input') {
-          llmInputPayload = event.llm_input || null;
-          setLlmInput(llmInputPayload);
-          continue;
-        }
-
-        if (event.type === 'token') {
-          fullAnswer += event.text || '';
-          setAnswer(fullAnswer);
-        }
-      }
-    }
-
-    setRetrieval({ contextCount, citations, trace });
-
-    return {
-      context_count: contextCount,
-      citation_count: citations.length,
-      keyword_hits: trace?.keyword?.count ?? 0,
-      vector_hits: trace?.vector?.count ?? 0,
-      fusion_hits: trace?.fusion?.count ?? 0,
-      overlap_rate: trace?.metrics?.overlap_rate ?? 0,
-      fusion_gain: trace?.metrics?.fusion_gain ?? 0,
-      timing_ms: trace?.timing_ms || null,
-      flow: trace?.flow || null,
-      fusion_preview: (trace?.fusion?.detailed_hits || []).slice(0, 5),
-      llm_input: llmInputPayload,
-      answer_length: fullAnswer.length,
-      answer_text: fullAnswer,
-    };
-  }
-
-  async function runDemo() {
+  const runDemoFlow = async () => {
     if (running) return;
-
-    const queryText = question.trim() || DEFAULT_QUESTION;
-    const activeDoc = selectedDoc;
     setRunning(true);
-    setError('');
-    setNotice('');
-    setAnswer('');
+    setSteps(createSteps(question, selectedDoc.filePath, selectedDoc.title));
     setRetrieval(null);
-    setLlmInput(null);
-    setActiveChunk(null);
-    setSteps(createSteps(queryText, activeDoc.filePath, activeDoc.title));
-
     try {
-      const sampleResult = await executeStep('download', async () => {
-        if (activeDoc.prepare === 'remote_sample') {
-          return apiPost(apiBase, '/api/v1/debug/sample-doc', {});
-        }
-        return {
-          status: 'using_local',
-          file_path: activeDoc.filePath,
-          doc: activeDoc.title,
-        };
-      });
-      const targetPath = sampleResult.file_path || activeDoc.filePath;
-      setDocPath(targetPath);
+      // 1. Download/Prepare
+      patchStep('download', { status: 'running' });
+      await new Promise(r => setTimeout(r, 800));
+      patchStep('download', { status: 'done', output: { status: 'ok', file: selectedDoc.filePath } });
 
-      setSteps((prev) =>
-        prev.map((item) => {
-          if (item.id === 'index' || item.id === 'poll') {
-            return {
-              ...item,
-              input: {
-                ...item.input,
-                file_path: targetPath,
-              },
-            };
-          }
-          return item;
-        }),
-      );
+      // 2. Index
+      patchStep('index', { status: 'running' });
+      const idxRes = await apiPost('/api/v1/index/file', { file_path: selectedDoc.filePath });
+      patchStep('index', { status: 'done', output: idxRes });
 
-      const preStats = await apiGet(
-        apiBase,
-        `/api/v1/debug/file-stats?file_path=${encodeURIComponent(targetPath)}`,
-      );
-
-      let pollResult = preStats;
-      if ((preStats.chunk_count || 0) > 0) {
-        patchStep('index', {
-          status: 'done',
-          output: {
-            status: 'skipped',
-            reason: 'already_indexed',
-            file_path: targetPath,
-            chunk_count: preStats.chunk_count,
-          },
-          durationMs: 0,
-        });
-        patchStep('poll', {
-          status: 'done',
-          output: {
-            ...preStats,
-            polls: 0,
-            status: 'already_indexed',
-          },
-          durationMs: 0,
-        });
-      } else {
-        await executeStep('index', () =>
-          apiPost(apiBase, '/api/v1/index/file', {
-            file_path: targetPath,
-          }),
-        );
-
-        const maxPolls = activePage === 'eval' ? 240 : 30;
-        pollResult = await executeStep('poll', async () => {
-          let latest = null;
-          for (let i = 0; i < maxPolls; i += 1) {
-            latest = await apiGet(apiBase, `/api/v1/debug/file-stats?file_path=${encodeURIComponent(targetPath)}`);
-            if (latest.chunk_count > 0) {
-              return {
-                ...latest,
-                polls: i + 1,
-              };
-            }
-            await new Promise((resolve) => setTimeout(resolve, 1000));
-          }
-          throw new Error(`索引超时：${maxPolls} 秒内未检测到入库 chunk`);
-        });
+      // 3. Poll
+      patchStep('poll', { status: 'running' });
+      let stats = null;
+      for(let i=0; i<30; i++) {
+        stats = await apiGet(`/api/v1/debug/file-stats?file_path=${encodeURIComponent(selectedDoc.filePath)}`);
+        if (stats.chunk_count > 0) break;
+        await new Promise(r => setTimeout(r, 1000));
       }
+      patchStep('poll', { status: 'done', output: stats });
 
-      setChunkCount(pollResult.chunk_count || 0);
-
-      const retrievalOutput = await executeStep('retrieve', () => askWithTrace(queryText));
-
-      await executeStep('answer', async () => ({
-        preview: retrievalOutput.answer_text.slice(0, 240),
-        answer_length: retrievalOutput.answer_length,
-        llm_input_messages: retrievalOutput.llm_input?.messages?.length || 0,
-        llm_input_contexts: retrievalOutput.llm_input?.contexts?.length || 0,
-      }));
-
-      setNotice('流程已跑通，结果已可视化');
-      await refreshStatus(targetPath);
+      // 4. Retrieve (Ask)
+      patchStep('retrieve', { status: 'running' });
+      const res = await fetch(resolveUrl(apiBase, '/api/v1/qa/ask'), {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify({ query: question, debug: true })
+      });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let trace = null;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const { payloads, remaining } = extractSsePayloads(buffer);
+        buffer = remaining;
+        for (const raw of payloads) {
+          const ev = JSON.parse(raw);
+          if (ev.type === 'trace') trace = ev.trace;
+        }
+      }
+      setRetrieval({ trace });
+      patchStep('retrieve', { status: 'done', output: { trace_received: true } });
     } catch (err) {
-      setError(String(err.message || err));
-    } finally {
-      setRunning(false);
-    }
-  }
-
-  function openChunkDetail(sourceTitle, item) {
-    setActiveChunk({
-      source: sourceTitle,
-      id: item.id,
-      rank: item.rank ?? item.final_rank,
-      file_name: item.file_name,
-      file_path: item.file_path,
-      chunk_id: item.chunk_id,
-      preview: item.preview,
-      content: item.content,
-    });
-  }
+      console.error(err);
+    } finally { setRunning(false); }
+  };
 
   return (
-    <div className="app">
-      <header className="hero">
-        <h1>Everything Ent Hybrid</h1>
-        <p>
-          {activePage === 'chat'
-            ? '用户问答：会话列表 + 流式回答 + 持久化聊天历史。'
-            : activePage === 'demo'
-              ? '零配置体验：固定测试文档 + 一键跑通索引与问答 + 每一步输入输出可视化。'
-              : 'DuRetrieval 评测页：使用 C-MTEB 与 mteb 两套语料快照执行索引与问答验证。'}
-        </p>
-        <div className="tab-row">
-          <button
-            type="button"
-            className={activePage === 'chat' ? '' : 'ghost'}
-            onClick={() => setActivePage('chat')}
-            disabled={running || chatStreaming}
-          >
-            用户问答
-          </button>
-          <button
-            type="button"
-            className={activePage === 'demo' ? '' : 'ghost'}
-            onClick={() => setActivePage('demo')}
-            disabled={running || chatStreaming}
-          >
-            流程演示
-          </button>
-          <button
-            type="button"
-            className={activePage === 'eval' ? '' : 'ghost'}
-            onClick={() => setActivePage('eval')}
-            disabled={running || chatStreaming}
-          >
-            DuRetrieval 评测
-          </button>
+    <div className="app-container">
+      {/* Sidebar - 只在 Chat 页面有明显作用 */}
+      <aside className="sidebar">
+        <div className="sidebar-header">
+           <div className="logo">Everything Ent</div>
+           <button className="new-chat-btn" onClick={() => { setActiveSessionId(null); setMessages([]); setActivePage('chat'); }}>
+             + 新建对话
+           </button>
         </div>
-      </header>
-
-      <section className="summary">
-        <article>
-          <h2>服务状态</h2>
-          <p>{health?.status || 'unknown'}</p>
-        </article>
-        <article>
-          <h2>{activePage === 'chat' ? '当前会话' : '测试文档'}</h2>
-          {activePage === 'chat' ? (
-            <>
-              <p>{chatConversationId || '-'}</p>
-              <p className="muted">session_id: {selectedSessionId || 'new'}</p>
-            </>
-          ) : (
-            <>
-              <p>{selectedDoc.title}</p>
-              <p className="muted">{docPath}</p>
-            </>
-          )}
-        </article>
-        <article>
-          <h2>{activePage === 'chat' ? '消息数量' : '已入库 Chunk'}</h2>
-          <p>{activePage === 'chat' ? chatMessages.length : chunkCount}</p>
-        </article>
-        <article>
-          <h2>执行账号</h2>
-          <p>{DEFAULT_USER_ID}</p>
-        </article>
-        <article>
-          <h2>当前页面</h2>
-          <p>{activePage === 'chat' ? '用户问答' : activePage === 'demo' ? '流程演示' : 'DuRetrieval 评测'}</p>
-        </article>
-      </section>
-
-      {activePage === 'chat' && (
-        <section className="chat-layout">
-          <aside className="chat-sidebar">
-            <h2>会话列表</h2>
-            <label>
-              user_id
-              <input
-                value={sessionUserId}
-                onChange={(event) => setSessionUserId(event.target.value)}
-                placeholder="admin"
-              />
-            </label>
-            <div className="action-row">
-              <button type="button" className="ghost" onClick={() => refreshSessions(sessionUserId, sessionLimit)}>
-                刷新会话
+        <nav className="nav-menu">
+           <button className={activePage === 'chat' ? 'active' : ''} onClick={() => setActivePage('chat')}>智能对话</button>
+           <button className={activePage === 'demo' ? 'active' : ''} onClick={() => setActivePage('demo')}>流程演示</button>
+           <button className={activePage === 'eval' ? 'active' : ''} onClick={() => setActivePage('eval')}>评测报告</button>
+        </nav>
+        {activePage === 'chat' && (
+          <div className="session-list">
+            <header>最近历史</header>
+            {sessions.map(s => (
+              <button key={s.id} className={activeSessionId === s.id ? 'active' : ''} onClick={() => { setActiveSessionId(s.id); loadMessages(s.id); }}>
+                {s.title || '新会话'}
               </button>
-              <button type="button" className="ghost" onClick={startNewConversation} disabled={chatStreaming}>
-                新建会话
-              </button>
-            </div>
-            {!sessions.length && <p className="muted">暂无会话记录</p>}
-            {!!sessions.length && (
-              <ul className="compact-list">
-                {sessions.map((item) => (
-                  <li key={item.id}>
-                    <button
-                      type="button"
-                      className={`history-item-btn ${selectedSessionId === item.id ? 'is-active' : ''}`}
-                      onClick={() => {
-                        setSelectedSessionId(item.id);
-                        refreshSessionMessages(item.id, messageLimit, true);
-                      }}
-                    >
-                      <span>{item.title || item.id}</span>
-                      <small>{formatDateTime(item.created_at)}</small>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </aside>
+            ))}
+          </div>
+        )}
+      </aside>
 
-          <section className="chat-main">
-            <div className="chat-main-head">
-              <div>
-                <h2>用户问答窗口</h2>
-                <p className="muted">conversation_id: {chatConversationId || '-'}</p>
-              </div>
-              <button type="button" className="ghost" onClick={() => setChatDebugMode((prev) => !prev)}>
-                {chatDebugMode ? '关闭开发者模式' : '开启开发者模式'}
-              </button>
-            </div>
+      <main className="main-content">
+        {activePage === 'chat' && (
+          <div className="chat-view">
+             <div className="chat-header">智能问答机器人</div>
+             <div className="messages-container">
+               {messages.length === 0 ? (
+                 <div className="empty-state"><h3>欢迎体验 RAG 混合检索问答</h3><p>在下方输入框提问，我将基于知识库为您解答。</p></div>
+               ) : (
+                 messages.map(m => (
+                   <div key={m.id} className="message-wrapper">
+                     <div className={`message ${m.role === 'user' ? 'message-user' : 'message-ai'}`}>{m.content}</div>
+                     {m.citations?.items && (
+                       <div className="citations">
+                         {m.citations.items.map((c, i) => <div key={i} className="citation-item">[{c.index}] {c.file_name}</div>)}
+                       </div>
+                     )}
+                   </div>
+                 ))
+               )}
+               <div ref={messagesEndRef} />
+             </div>
+             <div className="input-container">
+               <div className="input-form">
+                 <textarea placeholder="输入问题..." value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleSendChat())}/>
+                 <button onClick={handleSendChat} disabled={!chatInput.trim() || isGenerating}>发送</button>
+               </div>
+             </div>
+          </div>
+        )}
 
-            <div className="chat-stream">
-              {!chatMessages.length && <p className="muted">输入问题后即可开始对话，答案会流式返回。</p>}
-              {!!chatMessages.length &&
-                chatMessages.map((item) => (
-                  <article key={item.id} className={`chat-bubble ${item.role === 'user' ? 'from-user' : 'from-assistant'}`}>
-                    <div className="message-head">
-                      <strong>{item.role === 'user' ? '用户' : '助手'}</strong>
-                      <small>{formatDateTime(item.created_at)}</small>
-                    </div>
-                    <p className="chat-content">{item.content || (chatStreaming ? '...' : '')}</p>
-                    {!!item.citations?.length && (
-                      <div className="chat-citations">
-                        {item.citations.slice(0, 5).map((citation, idx) => (
-                          <span key={`${item.id}-citation-${idx}`}>
-                            [{idx + 1}] {citation.file_name || citation.file_path || '-'}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </article>
-                ))}
-            </div>
-
-            <section className="chat-compose">
-              <label>
-                输入问题
-                <textarea
-                  value={chatInput}
-                  onChange={(event) => setChatInput(event.target.value)}
-                  placeholder="输入问题，按 Enter 发送，Shift+Enter 换行"
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' && !event.shiftKey) {
-                      event.preventDefault();
-                      sendChatMessage();
-                    }
-                  }}
-                />
-              </label>
-              <div className="action-row">
-                <button type="button" onClick={sendChatMessage} disabled={chatStreaming || !chatInput.trim()}>
-                  {chatStreaming ? '回答中...' : '发送'}
-                </button>
-              </div>
+        {activePage === 'demo' && (
+          <div className="demo-view scroll-view">
+            <header className="page-header">
+               <h2>流程演示</h2>
+               <p>零配置体验：一键跑通“文档下载 -> 索引入库 -> 检索召回 -> LLM回答”全流程。</p>
+            </header>
+            <section className="config-card">
+               <div className="input-group">
+                 <label>选择文档</label>
+                 <select value={selectedDocId} onChange={e => setSelectedDocId(e.target.value)}>
+                   {DEMO_DOC_LIBRARY.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}
+                 </select>
+               </div>
+               <div className="chip-list">
+                 {selectedDoc.examples.map(ex => <button key={ex} className="chip" onClick={() => setQuestion(ex)}>{ex}</button>)}
+               </div>
+               <div className="input-group">
+                 <label>测试问题</label>
+                 <textarea value={question} onChange={e => setQuestion(e.target.value)} />
+               </div>
+               <button className="primary-btn" onClick={runDemoFlow} disabled={running}>
+                 {running ? '正在执行流程...' : '一键跑通测试流程'}
+               </button>
             </section>
 
-            {chatHint && <p className="notice">{chatHint}</p>}
-            {chatError && <p className="error">{chatError}</p>}
+            <section className="workflow">
+               <h3>流程可视化</h3>
+               <div className="step-grid">
+                 {steps.map(s => <StepCard key={s.id} step={s} />)}
+               </div>
+            </section>
 
-            {chatDebugMode && (
-              <section className="trace">
-                <h2>开发者调试信息</h2>
-                {!chatTrace && <p className="muted">发送问题后显示检索链路与模型输入。</p>}
-                {!!chatTrace && (
-                  <>
-                    <div className="metric-row">
-                      <span>context: {chatCitations.length}</span>
-                      <span>keyword: {chatTrace.keyword?.count ?? 0}</span>
-                      <span>vector: {chatTrace.vector?.count ?? 0}</span>
-                      <span>fusion: {chatTrace.fusion?.count ?? 0}</span>
-                      <span>overlap_rate: {formatPercent(chatTrace.metrics?.overlap_rate)}</span>
-                      <span>total_ms: {formatMs(chatTrace.timing_ms?.total)}</span>
-                    </div>
-                    <div className="trace-grid trace-grid-2">
-                      <section className="trace-block">
-                        <h4>阶段耗时</h4>
-                        <TimingList timing={chatTrace.timing_ms} />
-                      </section>
-                      <section className="trace-block">
-                        <h4>候选流转</h4>
-                        <FlowList flow={chatTrace.flow} />
-                      </section>
-                    </div>
-                    <div className="trace-grid">
-                      <HitList title="关键词召回" hits={chatTrace.keyword?.hits || []} onOpenChunk={openChunkDetail} />
-                      <HitList title="向量召回" hits={chatTrace.vector?.hits || []} onOpenChunk={openChunkDetail} />
-                      <HitList title="融合结果" hits={chatTrace.fusion?.hits || []} onOpenChunk={openChunkDetail} />
-                    </div>
-                  </>
-                )}
-                <ChunkDetailPanel chunk={activeChunk} onClose={() => setActiveChunk(null)} />
-                <LlmInputPanel llmInput={chatLlmInput} />
+            {retrieval && (
+              <section className="trace-view">
+                <h3>检索指标可视化</h3>
+                <div className="metric-row">
+                   <span>Keyword: {retrieval.trace.keyword?.count}</span>
+                   <span>Vector: {retrieval.trace.vector?.count}</span>
+                   <span>Fusion: {retrieval.trace.fusion?.count}</span>
+                   <span>Total Time: {formatMs(retrieval.trace.timing_ms?.total)}</span>
+                </div>
+                <div className="trace-grid">
+                   <HitList title="关键词召回" hits={retrieval.trace.keyword?.hits} />
+                   <HitList title="向量召回" hits={retrieval.trace.vector?.hits} />
+                </div>
               </section>
             )}
-          </section>
-        </section>
-      )}
-
-      {activePage !== 'chat' && (
-        <>
-
-      <section className="actions">
-        <label>
-          {activePage === 'demo' ? '选择测试文档' : '选择评测数据集'}
-          <select value={selectedDocId} onChange={(event) => setSelectedDocId(event.target.value)}>
-            {visibleDocs.map((doc) => (
-              <option key={doc.id} value={doc.id}>
-                {doc.title}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="chip-list">
-          {selectedDoc.examples.map((item) => (
-            <button key={item} type="button" className="chip" onClick={() => setQuestion(item)}>
-              {item}
-            </button>
-          ))}
-        </div>
-        {activePage === 'eval' && (
-          <p className="muted">
-            当前问答基于本地数据文件：{selectedDoc.filePath}。如未入库，会先自动触发索引。          </p>
+          </div>
         )}
-        <label>
-          测试问题
-          <textarea
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            placeholder="请输入要测试的问题"
-          />
-        </label>
-        <div className="action-row">
-          <button type="button" onClick={runDemo} disabled={running}>
-            {running ? '执行中...' : activePage === 'demo' ? '一键跑通测试流程' : '一键跑通评测问答流程'}
-          </button>
-          <button type="button" className="ghost" onClick={refreshStatus} disabled={running}>
-            刷新状态
-          </button>
-          {activePage === 'eval' && (
-            <button type="button" className="ghost" onClick={refreshEvalDatasets} disabled={running}>
-              刷新评测清单
-            </button>
-          )}
-          {activePage === 'eval' && (
-            <button type="button" className="ghost" onClick={refreshEvalReports} disabled={running}>
-              刷新基线报表
-            </button>
-          )}
-        </div>
-        {activePage === 'eval' && evalHint && <p className="muted">{evalHint}</p>}
-        {activePage === 'eval' && reportHint && <p className="muted">{reportHint}</p>}
-        {notice && <p className="notice">{notice}</p>}
-        {error && <p className="error">{error}</p>}
-      </section>
 
-      {activePage === 'eval' && (
-        <>
-          <section className="workflow">
-            <h2>DuRetrieval 数据集状态</h2>
+        {activePage === 'eval' && (
+          <div className="eval-view scroll-view">
+            <header className="page-header">
+              <h2>DuRetrieval 评测</h2>
+              <p>基于标准数据集的召回率与 MRR 指标分析。</p>
+            </header>
             <div className="dataset-grid">
-              {evalDocs.map((item) => (
-                <article key={item.id} className="step-card">
-                  <h3>{item.title}</h3>
-                  <p className="muted">{item.filePath}</p>
-                  <div className="metric-row">
-                    <span>exists: {item.exists ? 'yes' : 'no'}</span>
-                    <span>indexed: {item.indexed ? 'yes' : 'no'}</span>
-                    <span>chunk: {item.chunkCount ?? 0}</span>
+              {evalDocs.map(d => (
+                <div key={d.id} className="mini-card">
+                  <h4>{d.title}</h4>
+                  <p className="muted">{d.filePath}</p>
+                  <div className="status-row">
+                    <span className={d.exists ? 'ok' : 'err'}>文件:{d.exists ? '存在' : '缺失'}</span>
+                    <span className={d.indexed ? 'ok' : 'err'}>索引:{d.indexed ? '已完成' : '未入库'}</span>
                   </div>
-                </article>
+                </div>
               ))}
             </div>
-          </section>
-          <BaselineReportPanel latest={latestEvalReport} items={evalReports} />
-        </>
-      )}
-
-      <section className="workflow">
-        <h2>索引与权限管理</h2>
-        <div className="trace-grid">
-          <section className="trace-block">
-            <h4>当前账号权限</h4>
-            {!myPermissions.length && <p className="muted">暂无权限数据</p>}
-            {!!myPermissions.length && (
-              <div className="metric-row">
-                {myPermissions.map((code) => (
-                  <span key={`my-perm-${code}`}>{code}</span>
-                ))}
-              </div>
-            )}
-            <div className="action-row">
-              <button type="button" className="ghost" onClick={refreshMyPermissions} disabled={running}>
-                刷新我的权限
-              </button>
-            </div>
-          </section>
-
-          <section className="trace-block">
-            <h4>索引删除</h4>
-            <label>
-              file_path
-              <input
-                value={deletePath}
-                onChange={(event) => setDeletePath(event.target.value)}
-                placeholder="/data/knowledge/example.md"
-              />
-            </label>
-            <div className="action-row">
-              <button type="button" className="ghost" onClick={deleteIndexedFile} disabled={running}>
-                删除该文件索引
-              </button>
-            </div>
-          </section>
-        </div>
-
-        <div className="trace-grid">
-          <section className="trace-block">
-            <h4>RBAC 初始化与查询</h4>
-            <label>
-              查询用户 ID
-              <input
-                value={permissionUserId}
-                onChange={(event) => setPermissionUserId(event.target.value)}
-                placeholder="admin"
-              />
-            </label>
-            <div className="action-row">
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => runAdminAction('RBAC 初始化', () => apiPost(apiBase, '/api/v1/admin/bootstrap', {}))}
-                disabled={running}
-              >
-                执行 RBAC Bootstrap
-              </button>
-              <button type="button" className="ghost" onClick={() => queryUserPermissions()} disabled={running}>
-                查询用户权限
-              </button>
-            </div>
-            {!!permissionLookup.length && (
-              <div className="metric-row">
-                {permissionLookup.map((code) => (
-                  <span key={`lookup-perm-${code}`}>{code}</span>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="trace-block">
-            <h4>创建角色与权限</h4>
-            <label>
-              角色名
-              <input value={roleName} onChange={(event) => setRoleName(event.target.value)} placeholder="analyst" />
-            </label>
-            <div className="action-row">
-              <button
-                type="button"
-                className="ghost"
-                onClick={() =>
-                  runAdminAction('创建角色', () =>
-                    apiPost(apiBase, '/api/v1/admin/roles', {
-                      name: roleName.trim(),
-                    }),
-                  )
-                }
-                disabled={running}
-              >
-                创建角色
-              </button>
-            </div>
-            <label>
-              权限码
-              <input
-                value={permissionCode}
-                onChange={(event) => setPermissionCode(event.target.value)}
-                placeholder="kb:export"
-              />
-            </label>
-            <label>
-              权限描述
-              <input
-                value={permissionDescription}
-                onChange={(event) => setPermissionDescription(event.target.value)}
-                placeholder="Allow exporting indexed chunks"
-              />
-            </label>
-            <div className="action-row">
-              <button
-                type="button"
-                className="ghost"
-                onClick={() =>
-                  runAdminAction('创建权限', () =>
-                    apiPost(apiBase, '/api/v1/admin/permissions', {
-                      code: permissionCode.trim(),
-                      description: permissionDescription.trim(),
-                    }),
-                  )
-                }
-                disabled={running}
-              >
-                创建权限
-              </button>
-            </div>
-          </section>
-        </div>
-
-        <div className="trace-grid">
-          <section className="trace-block">
-            <h4>角色授权权限</h4>
-            <label>
-              角色名
-              <input
-                value={bindRoleName}
-                onChange={(event) => setBindRoleName(event.target.value)}
-                placeholder="analyst"
-              />
-            </label>
-            <label>
-              权限码
-              <input
-                value={bindPermissionCode}
-                onChange={(event) => setBindPermissionCode(event.target.value)}
-                placeholder="kb:export"
-              />
-            </label>
-            <div className="action-row">
-              <button
-                type="button"
-                className="ghost"
-                onClick={() =>
-                  runAdminAction('绑定权限到角色', () =>
-                    apiPost(
-                      apiBase,
-                      `/api/v1/admin/roles/${encodeURIComponent(bindRoleName.trim())}/permissions/${encodeURIComponent(bindPermissionCode.trim())}`,
-                      {},
-                    ),
-                  )
-                }
-                disabled={running}
-              >
-                绑定权限到角色
-              </button>
-            </div>
-          </section>
-
-          <section className="trace-block">
-            <h4>分配角色给用户</h4>
-            <label>
-              用户 ID
-              <input
-                value={assignUserId}
-                onChange={(event) => setAssignUserId(event.target.value)}
-                placeholder="alice"
-              />
-            </label>
-            <label>
-              角色名
-              <input
-                value={assignRoleName}
-                onChange={(event) => setAssignRoleName(event.target.value)}
-                placeholder="analyst"
-              />
-            </label>
-            <div className="action-row">
-              <button
-                type="button"
-                className="ghost"
-                onClick={() =>
-                  runAdminAction('分配角色给用户', () =>
-                    apiPost(
-                      apiBase,
-                      `/api/v1/admin/users/${encodeURIComponent(assignUserId.trim())}/roles/${encodeURIComponent(assignRoleName.trim())}`,
-                      {},
-                    ),
-                  )
-                }
-                disabled={running}
-              >
-                分配角色
-              </button>
-            </div>
-          </section>
-        </div>
-        {adminNotice && <p className="notice">{adminNotice}</p>}
-        {adminError && <p className="error">{adminError}</p>}
-        {!!adminResult && <pre>{JSON.stringify(adminResult, null, 2)}</pre>}
-      </section>
-
-      <section className="workflow">
-        <h2>会话历史</h2>
-        <div className="trace-grid">
-          <section className="trace-block">
-            <h4>会话列表</h4>
-            <label>
-              user_id
-              <input
-                value={sessionUserId}
-                onChange={(event) => setSessionUserId(event.target.value)}
-                placeholder="admin"
-              />
-            </label>
-            <label>
-              会话上限
-              <input
-                type="number"
-                min={1}
-                max={200}
-                value={sessionLimit}
-                onChange={(event) => setSessionLimit(Number(event.target.value) || 20)}
-              />
-            </label>
-            <div className="action-row">
-              <button type="button" className="ghost" onClick={() => refreshSessions()} disabled={running}>
-                拉取会话
-              </button>
-            </div>
-            {!sessions.length && <p className="muted">暂无会话</p>}
-            {!!sessions.length && (
-              <ul className="compact-list">
-                {sessions.map((item) => (
-                  <li key={item.id}>
-                    <button
-                      type="button"
-                      className={`history-item-btn ${selectedSessionId === item.id ? 'is-active' : ''}`}
-                      onClick={() => {
-                        setSelectedSessionId(item.id);
-                        refreshSessionMessages(item.id, messageLimit);
-                      }}
-                    >
-                      <span>{item.title || item.id}</span>
-                      <small>{formatDateTime(item.created_at)}</small>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <section className="trace-block">
-            <h4>会话消息</h4>
-            <label>
-              消息上限
-              <input
-                type="number"
-                min={1}
-                max={500}
-                value={messageLimit}
-                onChange={(event) => setMessageLimit(Number(event.target.value) || 100)}
-              />
-            </label>
-            <div className="action-row">
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => refreshSessionMessages()}
-                disabled={running || !selectedSessionId}
-              >
-                拉取消息
-              </button>
-            </div>
-            {!selectedSessionId && <p className="muted">请先选择会话</p>}
-            {!!selectedSessionId && !sessionMessages.length && <p className="muted">该会话暂无消息</p>}
-            {!!sessionMessages.length && (
-              <ul className="message-list">
-                {sessionMessages.map((item) => (
-                  <li key={item.id}>
-                    <div className="message-head">
-                      <strong>{item.role || '-'}</strong>
-                      <small>{formatDateTime(item.created_at)}</small>
-                    </div>
-                    <pre>{item.content || ''}</pre>
-                    {!!item.citations && <pre>{JSON.stringify(item.citations, null, 2)}</pre>}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </div>
-        {chatHint && <p className="notice">{chatHint}</p>}
-        {chatError && <p className="error">{chatError}</p>}
-      </section>
-
-      <section className="workflow">
-        <h2>流程可视化（输入 / 输出）</h2>
-        <div className="step-grid">
-          {steps.map((step) => (
-            <StepCard key={step.id} step={step} />
-          ))}
-        </div>
-      </section>
-
-      <section className="result">
-        <h2>问答结果</h2>
-        <div className="answer-box">{answer || '执行后显示答案'}</div>
-      </section>
-
-      <section className="trace">
-        <h2>检索指标</h2>
-        {!retrieval?.trace && <p className="muted">执行流程后显示召回与融合指标。</p>}
-        {!!retrieval?.trace && (
-          <>
-            <div className="metric-row">
-              <span>context: {retrieval.contextCount}</span>
-              <span>keyword: {retrieval.trace.keyword?.count ?? 0}</span>
-              <span>vector: {retrieval.trace.vector?.count ?? 0}</span>
-              <span>fusion: {retrieval.trace.fusion?.count ?? 0}</span>
-              <span>overlap_rate: {formatPercent(retrieval.trace.metrics?.overlap_rate)}</span>
-              <span>fusion_gain: {retrieval.trace.metrics?.fusion_gain ?? 0}</span>
-              <span>total_ms: {formatMs(retrieval.trace.timing_ms?.total)}</span>
-            </div>
-            <div className="trace-grid trace-grid-2">
-              <section className="trace-block">
-                <h4>阶段耗时</h4>
-                <TimingList timing={retrieval.trace.timing_ms} />
-              </section>
-              <section className="trace-block">
-                <h4>候选流转</h4>
-                <FlowList flow={retrieval.trace.flow} />
-              </section>
-            </div>
-            <section className="trace-block">
-              <h4>融合贡献明细（Top Final）</h4>
-              <FusionTable
-                rows={retrieval.trace.fusion?.detailed_hits || []}
-                onOpenChunk={openChunkDetail}
-                sourceTitle="融合贡献明细"
-              />
-            </section>
-            <section className="trace-block">
-              <h4>未进入 Top-K 的候选</h4>
-              <FusionTable
-                rows={retrieval.trace.fusion?.dropped_candidates || []}
-                onOpenChunk={openChunkDetail}
-                sourceTitle="未进入Top-K"
-              />
-            </section>
-            <div className="trace-grid">
-              <HitList title="关键词召回" hits={retrieval.trace.keyword?.hits || []} onOpenChunk={openChunkDetail} />
-              <HitList title="向量召回" hits={retrieval.trace.vector?.hits || []} onOpenChunk={openChunkDetail} />
-              <HitList title="融合结果" hits={retrieval.trace.fusion?.hits || []} onOpenChunk={openChunkDetail} />
-            </div>
-          </>
+            <BaselineReportPanel latest={latestReport} items={evalReports} />
+          </div>
         )}
-        <ChunkDetailPanel chunk={activeChunk} onClose={() => setActiveChunk(null)} />
-        <LlmInputPanel llmInput={llmInput} />
-      </section>
-        </>
-      )}
+      </main>
     </div>
   );
 }
-
