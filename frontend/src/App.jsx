@@ -306,36 +306,71 @@ function formatDateTime(value) {
   return date.toLocaleString();
 }
 
-function pickMetric(metrics, name, preferredK = 5) {
-  if (!metrics || typeof metrics !== 'object') return '-';
-  const exact = metrics[`${name}@${preferredK}`];
-  if (typeof exact === 'number') return exact.toFixed(4);
-  const key = Object.keys(metrics)
-    .filter((item) => item.startsWith(`${name}@`))
-    .sort((a, b) => {
-      const aK = Number(a.split('@')[1] || 0);
-      const bK = Number(b.split('@')[1] || 0);
-      return aK - bK;
-    })[0];
-  if (!key) return '-';
-  const fallback = metrics[key];
-  return typeof fallback === 'number' ? fallback.toFixed(4) : '-';
+function reportTimestamp(item) {
+  const ts = Date.parse(item?.created_at || '');
+  return Number.isFinite(ts) ? ts : 0;
 }
 
-function pickMetricValue(metrics, name, preferredK = 5) {
+function sortReportsByCreatedAt(items) {
+  return [...(items || [])].sort((a, b) => {
+    const diff = reportTimestamp(b) - reportTimestamp(a);
+    if (diff !== 0) return diff;
+    return String(b?.file_name || '').localeCompare(String(a?.file_name || ''));
+  });
+}
+
+function parseMetricKey(key) {
+  if (typeof key !== 'string') return null;
+  const parts = key.split('@');
+  if (parts.length !== 2) return null;
+  const metric = parts[0]?.trim().toLowerCase();
+  const k = Number(parts[1]);
+  if (!metric || !Number.isFinite(k) || k <= 0) return null;
+  return { metric, k };
+}
+
+function collectMetricNames(methodMetricsMap) {
+  const seen = new Set();
+  Object.values(methodMetricsMap || {}).forEach((metrics) => {
+    if (!metrics || typeof metrics !== 'object') return;
+    Object.keys(metrics).forEach((key) => {
+      const parsed = parseMetricKey(key);
+      if (parsed) seen.add(parsed.metric);
+    });
+  });
+  const preferredOrder = ['hit', 'recall', 'mrr', 'map', 'ndcg'];
+  const ordered = preferredOrder.filter((metric) => seen.has(metric));
+  const extras = Array.from(seen).filter((metric) => !preferredOrder.includes(metric)).sort();
+  return [...ordered, ...extras];
+}
+
+function collectKs(summary) {
+  const fromSummary = Array.isArray(summary?.ks)
+    ? summary.ks
+        .map((item) => Number(item))
+        .filter((item) => Number.isFinite(item) && item > 0)
+    : [];
+  const fromMetrics = [];
+  const methodMetricsMap = summary?.metrics || {};
+  Object.values(methodMetricsMap).forEach((metrics) => {
+    if (!metrics || typeof metrics !== 'object') return;
+    Object.keys(metrics).forEach((key) => {
+      const parsed = parseMetricKey(key);
+      if (parsed) fromMetrics.push(parsed.k);
+    });
+  });
+  // Always render k=10 so users can quickly verify whether @10 exists for the selected report.
+  return Array.from(new Set([...fromSummary, ...fromMetrics, 10])).sort((a, b) => a - b);
+}
+
+function getMetricValue(metrics, metric, k) {
   if (!metrics || typeof metrics !== 'object') return null;
-  const exact = metrics[`${name}@${preferredK}`];
-  if (typeof exact === 'number') return exact;
-  const key = Object.keys(metrics)
-    .filter((item) => item.startsWith(`${name}@`))
-    .sort((a, b) => {
-      const aK = Number(a.split('@')[1] || 0);
-      const bK = Number(b.split('@')[1] || 0);
-      return aK - bK;
-    })[0];
-  if (!key) return null;
-  const fallback = metrics[key];
-  return typeof fallback === 'number' ? fallback : null;
+  const exact = metrics[`${metric}@${k}`];
+  return typeof exact === 'number' ? exact : null;
+}
+
+function formatMetricValue(value) {
+  return typeof value === 'number' && !Number.isNaN(value) ? value.toFixed(4) : '-';
 }
 
 function statusLabel(status) {
@@ -558,34 +593,57 @@ function LlmInputPanel({ llmInput }) {
 
 function BaselineReportPanel({ latest, items }) {
   const [selectedFileName, setSelectedFileName] = useState('');
+  const baselineItems = useMemo(
+    () => sortReportsByCreatedAt((items || []).filter((item) => !item?.file_name?.includes('_es_ab'))),
+    [items],
+  );
 
   const effectiveSelectedFileName = useMemo(() => {
-    if (!items?.length) return '';
-    if (selectedFileName && items.some((item) => item.file_name === selectedFileName)) {
+    if (!baselineItems.length) return '';
+    if (selectedFileName && baselineItems.some((item) => item.file_name === selectedFileName)) {
       return selectedFileName;
     }
-    return items[0].file_name;
-  }, [items, selectedFileName]);
+    return baselineItems[0].file_name;
+  }, [baselineItems, selectedFileName]);
 
   const activeSummary = useMemo(() => {
-    if (items?.length) {
-      const matched = items.find((item) => item.file_name === effectiveSelectedFileName);
+    if (baselineItems.length) {
+      const matched = baselineItems.find((item) => item.file_name === effectiveSelectedFileName);
       if (matched) return matched;
-      return items[0];
+      return baselineItems[0];
     }
-    return latest || null;
-  }, [items, latest, effectiveSelectedFileName]);
+    if (latest && !latest?.file_name?.includes('_es_ab')) {
+      return latest;
+    }
+    return null;
+  }, [baselineItems, latest, effectiveSelectedFileName]);
 
   const methods = activeSummary?.metrics ? Object.keys(activeSummary.metrics) : [];
+  const ks = collectKs(activeSummary);
+  const metricNames = collectMetricNames(activeSummary?.metrics || {});
+  const strictRows = methods.flatMap((method) => {
+    const metrics = activeSummary?.metrics?.[method] || {};
+    const cost = activeSummary?.method_cost_seconds?.[method];
+    return ks.map((k) => ({
+      method,
+      k,
+      cost,
+      values: metricNames.reduce((acc, metricName) => {
+        acc[metricName] = getMetricValue(metrics, metricName, k);
+        return acc;
+      }, {}),
+    }));
+  });
 
   return (
     <section className="workflow">
-      <h2>公共基线报表</h2>
+      <h2>公共基线报表（严格口径）</h2>
       {!activeSummary && <p className="muted">暂无基线报表，请先运行 eval 脚本。</p>}
       {!!activeSummary && (
         <>
           <div className="metric-row">
             <span>dataset: {activeSummary.dataset || '-'}</span>
+            <span>report: {activeSummary.file_name || '-'}</span>
             <span>method: {activeSummary.method || '-'}</span>
             <span>top_k: {activeSummary.top_k ?? '-'}</span>
             <span>created_at: {formatDateTime(activeSummary.created_at)}</span>
@@ -597,45 +655,49 @@ function BaselineReportPanel({ latest, items }) {
             <span>qrels_queries: {activeSummary.counts?.qrels_queries ?? '-'}</span>
             <span>qrels_pairs: {activeSummary.counts?.qrels_pairs ?? '-'}</span>
           </div>
+          <p className="muted">
+            严格展示规则：每一行固定同一个 k，指标值直接读取评测报告原始字段（如 hit@k、recall@k、mrr@k）。
+          </p>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>method</th>
-                  <th>hit@5</th>
-                  <th>recall@5</th>
-                  <th>mrr@10</th>
-                  <th>map@10</th>
-                  <th>ndcg@10</th>
+                  <th>k</th>
+                  {metricNames.map((metricName) => (
+                    <th key={`baseline-head-${metricName}`}>{metricName}@k</th>
+                  ))}
                   <th>cost(s)</th>
                 </tr>
               </thead>
               <tbody>
-                {methods.map((method) => {
-                  const metrics = activeSummary.metrics?.[method] || {};
-                  const cost = activeSummary.method_cost_seconds?.[method];
-                  return (
-                    <tr key={`metric-${method}`}>
-                      <td>{method}</td>
-                      <td>{pickMetric(metrics, 'hit', 5)}</td>
-                      <td>{pickMetric(metrics, 'recall', 5)}</td>
-                      <td>{pickMetric(metrics, 'mrr', 10)}</td>
-                      <td>{pickMetric(metrics, 'map', 10)}</td>
-                      <td>{pickMetric(metrics, 'ndcg', 10)}</td>
-                      <td>{typeof cost === 'number' ? cost.toFixed(3) : '-'}</td>
-                    </tr>
-                  );
-                })}
+                {!strictRows.length && (
+                  <tr>
+                    <td colSpan={metricNames.length + 3}>无可展示指标</td>
+                  </tr>
+                )}
+                {strictRows.map((row) => (
+                  <tr key={`metric-${row.method}-${row.k}`}>
+                    <td>{row.method}</td>
+                    <td>{row.k}</td>
+                    {metricNames.map((metricName) => (
+                      <td key={`metric-${row.method}-${row.k}-${metricName}`}>
+                        {formatMetricValue(row.values[metricName])}
+                      </td>
+                    ))}
+                    <td>{typeof row.cost === 'number' ? row.cost.toFixed(3) : '-'}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
         </>
       )}
-      {!!items?.length && (
+      {!!baselineItems.length && (
         <div className="history-list">
           <h4>历史报表</h4>
           <ul>
-            {items.slice(0, 6).map((item) => (
+            {baselineItems.slice(0, 6).map((item) => (
               <li key={item.file_name}>
                 <button
                   type="button"
@@ -659,13 +721,15 @@ function AnalyzerComparisonPanel({ latest, items }) {
 
   const abItems = useMemo(
     () =>
-      (items || []).filter(
-        (item) =>
-          item?.file_name?.includes('_es_ab') &&
-          item?.metrics &&
-          typeof item.metrics === 'object' &&
-          item.metrics.ik &&
-          item.metrics.standard,
+      sortReportsByCreatedAt(
+        (items || []).filter(
+          (item) =>
+            item?.file_name?.includes('_es_ab') &&
+            item?.metrics &&
+            typeof item.metrics === 'object' &&
+            item.metrics.ik &&
+            item.metrics.standard,
+        ),
       ),
     [items],
   );
@@ -696,17 +760,23 @@ function AnalyzerComparisonPanel({ latest, items }) {
 
   const ikMetrics = activeSummary?.metrics?.ik || {};
   const stdMetrics = activeSummary?.metrics?.standard || {};
-  const rows = [
-    ['hit@5', pickMetricValue(ikMetrics, 'hit', 5), pickMetricValue(stdMetrics, 'hit', 5)],
-    ['recall@5', pickMetricValue(ikMetrics, 'recall', 5), pickMetricValue(stdMetrics, 'recall', 5)],
-    ['mrr@10', pickMetricValue(ikMetrics, 'mrr', 10), pickMetricValue(stdMetrics, 'mrr', 10)],
-    ['map@10', pickMetricValue(ikMetrics, 'map', 10), pickMetricValue(stdMetrics, 'map', 10)],
-    ['ndcg@10', pickMetricValue(ikMetrics, 'ndcg', 10), pickMetricValue(stdMetrics, 'ndcg', 10)],
-  ];
+  const ks = collectKs(activeSummary);
+  const metricNames = collectMetricNames({ ik: ikMetrics, standard: stdMetrics });
+  const rows = ks.flatMap((k) =>
+    metricNames.map((metricName) => {
+      const ikValue = getMetricValue(ikMetrics, metricName, k);
+      const stdValue = getMetricValue(stdMetrics, metricName, k);
+      return {
+        name: `${metricName}@${k}`,
+        ikValue,
+        stdValue,
+      };
+    }),
+  );
 
   return (
     <section className="workflow">
-      <h2>IK vs standard 对比</h2>
+      <h2>IK vs standard 对比（严格口径）</h2>
       {!activeSummary && <p className="muted">暂无 ES Analyzer A/B 报表，请先运行 run_es_analyzer_ab.py。</p>}
       {!!activeSummary && (
         <>
@@ -721,24 +791,32 @@ function AnalyzerComparisonPanel({ latest, items }) {
             <span>standard_cost: {typeof activeSummary.method_cost_seconds?.standard === 'number' ? `${activeSummary.method_cost_seconds.standard.toFixed(3)} s` : '-'}</span>
             <span>total_cost: {typeof activeSummary.cost_seconds_total === 'number' ? `${activeSummary.cost_seconds_total.toFixed(3)} s` : '-'}</span>
           </div>
+          <p className="muted">
+            严格展示规则：逐项展示报告中的 metric@k 原值，不混用 @5 与 @10。
+          </p>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>metric</th>
+                  <th>metric@k</th>
                   <th>IK</th>
                   <th>standard</th>
                   <th>IK-standard</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map(([name, ikValue, stdValue]) => {
+                {!rows.length && (
+                  <tr>
+                    <td colSpan={4}>无可展示指标</td>
+                  </tr>
+                )}
+                {rows.map(({ name, ikValue, stdValue }) => {
                   const delta = typeof ikValue === 'number' && typeof stdValue === 'number' ? ikValue - stdValue : null;
                   return (
                     <tr key={`ab-${name}`}>
                       <td>{name}</td>
-                      <td>{typeof ikValue === 'number' ? ikValue.toFixed(4) : '-'}</td>
-                      <td>{typeof stdValue === 'number' ? stdValue.toFixed(4) : '-'}</td>
+                      <td>{formatMetricValue(ikValue)}</td>
+                      <td>{formatMetricValue(stdValue)}</td>
                       <td className={delta == null ? '' : delta > 0 ? 'delta-pos' : delta < 0 ? 'delta-neg' : 'delta-zero'}>
                         {typeof delta === 'number' ? `${delta >= 0 ? '+' : ''}${delta.toFixed(4)}` : '-'}
                       </td>
@@ -978,7 +1056,7 @@ export default function App() {
         // Ignore latest endpoint failures and fallback to list endpoint summary.
       }
       const items = Array.isArray(payload.items) ? payload.items : [];
-      setEvalReports(items);
+      setEvalReports(sortReportsByCreatedAt(items));
       setLatestEvalReport(latest);
       setReportHint(items.length ? `已同步 ${items.length} 份基线报表。` : '暂无基线报表，请先运行评测脚本。');
     } catch (err) {
