@@ -24,22 +24,21 @@ class ElasticsearchStore:
         if self.client.indices.exists(index=self.settings.es_index):
             return
 
+        content_mapping: dict[str, Any] = {"type": "text"}
+        text_analyzer = (self.settings.es_text_analyzer or "").strip()
+        search_analyzer = (self.settings.es_search_analyzer or "").strip()
+        if text_analyzer:
+            content_mapping["analyzer"] = text_analyzer
+        if search_analyzer:
+            content_mapping["search_analyzer"] = search_analyzer
+
         mappings = {
-            "settings": {
-                "analysis": {
-                    "analyzer": {
-                        "zh_en": {
-                            "type": "standard",
-                        }
-                    }
-                },
-            },
             "mappings": {
                 "properties": {
                     "doc_id": {"type": "keyword"},
                     "file_path": {"type": "keyword"},
                     "file_name": {"type": "keyword"},
-                    "content": {"type": "text", "analyzer": "zh_en"},
+                    "content": content_mapping,
                     "vector": {
                         "type": "dense_vector",
                         "dims": self.settings.embedding_dim,
@@ -71,10 +70,12 @@ class ElasticsearchStore:
                 "file_path": file_path,
                 "file_name": file_name,
                 "content": item["content"],
-                "vector": item["vector"],
                 "chunk_id": item["chunk_id"],
                 "mtime": mtime,
             }
+            vector = item.get("vector")
+            if vector is not None:
+                doc_source["vector"] = vector
             operations.append({"index": {"_index": self.settings.es_index, "_id": item["doc_id"]}})
             operations.append(doc_source)
 

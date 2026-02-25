@@ -718,6 +718,21 @@ tbody tr:hover {
   background: var(--surface);
 }
 
+.delta-pos {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.delta-neg {
+  color: var(--error);
+  font-weight: 600;
+}
+
+.delta-zero {
+  color: var(--muted);
+  font-weight: 600;
+}
+
 .raw-block {
   max-height: 400px;
   overflow-y: auto;

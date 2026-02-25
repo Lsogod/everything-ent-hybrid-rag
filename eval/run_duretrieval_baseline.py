@@ -36,7 +36,13 @@ class ChunkDoc:
 def _load_hf_datasets(
     source: str,
     cache_dir: str | None = None,
+    local_dataset_root: str | None = None,
 ) -> tuple[list[CorpusDoc], list[QueryDoc], dict[str, dict[str, float]], str]:
+    if source in {"local-c-mteb", "local-mteb"}:
+        local_source = "c_mteb" if source == "local-c-mteb" else "mteb"
+        root = local_dataset_root or "data/knowledge/datasets"
+        return _load_local_snapshot(local_source, root)
+
     try:
         from datasets import load_dataset
     except ModuleNotFoundError as exc:
@@ -44,7 +50,7 @@ def _load_hf_datasets(
             "missing dependency: datasets. install with `pip install -r eval/requirements.txt`"
         ) from exc
 
-    if source not in {"auto", "c-mteb", "mteb"}:
+    if source not in {"auto", "c-mteb", "mteb", "local-c-mteb", "local-mteb"}:
         raise ValueError(f"unsupported dataset source: {source}")
 
     errors: list[str] = []
@@ -81,6 +87,70 @@ def _load_hf_datasets(
                 raise RuntimeError("; ".join(errors)) from exc
 
     raise RuntimeError("failed to load DuRetrieval dataset: " + "; ".join(errors))
+
+
+def _load_local_snapshot(
+    source: str,
+    root: str,
+) -> tuple[list[CorpusDoc], list[QueryDoc], dict[str, dict[str, float]], str]:
+    dataset_dir = Path(root) / f"duretrieval_{source}"
+    corpus_path = dataset_dir / "corpus.md"
+    queries_path = dataset_dir / "queries.json"
+    qrels_path = dataset_dir / "qrels.json"
+    if not corpus_path.exists() or not queries_path.exists() or not qrels_path.exists():
+        raise RuntimeError(
+            f"local snapshot missing: {dataset_dir}. "
+            "run scripts/materialize_duretrieval_knowledge.py first"
+        )
+
+    corpus = _parse_local_corpus(corpus_path.read_text(encoding="utf-8"))
+    queries_payload = json.loads(queries_path.read_text(encoding="utf-8"))
+    qrels_payload = json.loads(qrels_path.read_text(encoding="utf-8"))
+    queries = [
+        QueryDoc(query_id=str(item["id"]).strip(), text=str(item["text"]).strip())
+        for item in queries_payload.get("items", [])
+        if str(item.get("id", "")).strip() and str(item.get("text", "")).strip()
+    ]
+    qrels: dict[str, dict[str, float]] = {}
+    for row in qrels_payload.get("items", []):
+        qid = str(row.get("qid", "")).strip()
+        if not qid:
+            continue
+        rel_docs = {}
+        for pid in row.get("relevant_doc_ids", []):
+            rid = str(pid).strip()
+            if rid:
+                rel_docs[rid] = 1.0
+        if rel_docs:
+            qrels[qid] = rel_docs
+    return corpus, queries, qrels, f"local/{source}"
+
+
+def _parse_local_corpus(raw: str) -> list[CorpusDoc]:
+    docs: list[CorpusDoc] = []
+    current_id: str | None = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_id, buf
+        if not current_id:
+            return
+        text = "\n".join(buf).strip()
+        if text:
+            docs.append(CorpusDoc(doc_id=current_id, text=text))
+        current_id = None
+        buf = []
+
+    for line in raw.splitlines():
+        if line.startswith("## DOC ") and "id=" in line:
+            flush()
+            current_id = line.split("id=", 1)[1].strip()
+            buf = []
+            continue
+        if current_id is not None:
+            buf.append(line)
+    flush()
+    return docs
 
 
 def _pick_key(row: dict[str, Any], keys: list[str]) -> str:
@@ -345,6 +415,7 @@ def _retrieve_dense(
     model_name: str,
     batch_size: int,
     device: str | None,
+    max_chars: int | None,
 ) -> dict[str, list[str]]:
     try:
         from sentence_transformers import SentenceTransformer
@@ -358,7 +429,7 @@ def _retrieve_dense(
         model_kwargs["device"] = device
     model = SentenceTransformer(model_name, **model_kwargs)
 
-    corpus_texts = [item.text for item in corpus]
+    corpus_texts = _clip_texts([item.text for item in corpus], max_chars)
     corpus_ids = [item.doc_id for item in corpus]
     corpus_embeddings = model.encode(
         corpus_texts,
@@ -368,7 +439,7 @@ def _retrieve_dense(
         convert_to_numpy=True,
     ).astype(np.float32)
 
-    query_texts = [item.text for item in queries]
+    query_texts = _clip_texts([item.text for item in queries], max_chars)
     query_ids = [item.query_id for item in queries]
     query_embeddings = model.encode(
         query_texts,
@@ -402,6 +473,18 @@ def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1.0, norms)
     return matrix / norms
+
+
+def _clip_texts(texts: list[str], max_chars: int | None) -> list[str]:
+    if not max_chars or max_chars <= 0:
+        return texts
+    clipped: list[str] = []
+    for text in texts:
+        item = (text or "").strip()
+        if len(item) > max_chars:
+            item = item[:max_chars]
+        clipped.append(item)
+    return clipped
 
 
 def _encode_openai_compatible_embeddings(
@@ -478,8 +561,9 @@ def _retrieve_dense_openai_compatible(
     expected_dim: int | None,
     use_dimensions: bool,
     timeout_seconds: float,
+    max_chars: int | None,
 ) -> dict[str, list[str]]:
-    corpus_texts = [item.text for item in corpus]
+    corpus_texts = _clip_texts([item.text for item in corpus], max_chars)
     corpus_ids = [item.doc_id for item in corpus]
     corpus_embeddings = _encode_openai_compatible_embeddings(
         texts=corpus_texts,
@@ -492,7 +576,7 @@ def _retrieve_dense_openai_compatible(
         timeout_seconds=timeout_seconds,
     )
 
-    query_texts = [item.text for item in queries]
+    query_texts = _clip_texts([item.text for item in queries], max_chars)
     query_ids = [item.query_id for item in queries]
     query_embeddings = _encode_openai_compatible_embeddings(
         texts=query_texts,
@@ -702,7 +786,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run public DuRetrieval (C-MTEB) retrieval baselines and export metrics."
     )
-    parser.add_argument("--dataset-source", choices=["auto", "c-mteb", "mteb"], default="auto")
+    parser.add_argument(
+        "--dataset-source",
+        choices=["auto", "c-mteb", "mteb", "local-c-mteb", "local-mteb"],
+        default="auto",
+    )
     parser.add_argument("--method", choices=["bm25", "dense", "both"], default="both")
     parser.add_argument(
         "--dense-backend",
@@ -717,6 +805,7 @@ def main() -> None:
     parser.add_argument("--dense-expected-dim", type=int, default=None)
     parser.add_argument("--dense-use-dimensions", choices=["auto", "true", "false"], default="auto")
     parser.add_argument("--dense-timeout", type=float, default=None)
+    parser.add_argument("--dense-max-chars", type=int, default=4000)
     parser.add_argument("--rrf-k", type=int, default=60)
     parser.add_argument("--rrf-bm25-weight", type=float, default=1.0)
     parser.add_argument("--rrf-dense-weight", type=float, default=1.0)
@@ -731,6 +820,7 @@ def main() -> None:
     parser.add_argument("--max-corpus", type=int, default=None)
     parser.add_argument("--max-queries", type=int, default=None)
     parser.add_argument("--cache-dir", default=None)
+    parser.add_argument("--local-dataset-root", default="data/knowledge/datasets")
     parser.add_argument("--output-dir", default="eval/reports")
     args = parser.parse_args()
 
@@ -746,6 +836,8 @@ def main() -> None:
         raise ValueError("dense-expected-dim must be positive")
     if args.dense_timeout is not None and args.dense_timeout <= 0:
         raise ValueError("dense-timeout must be positive")
+    if args.dense_max_chars is not None and args.dense_max_chars <= 0:
+        raise ValueError("dense-max-chars must be positive when set")
     if args.chunk_size <= 0:
         raise ValueError("chunk-size must be positive")
     if args.chunk_overlap < 0 or args.chunk_overlap >= args.chunk_size:
@@ -756,7 +848,11 @@ def main() -> None:
     ks = _parse_ks(args.ks)
     started = time.perf_counter()
 
-    corpus, queries, qrels, dataset_name = _load_hf_datasets(args.dataset_source, args.cache_dir)
+    corpus, queries, qrels, dataset_name = _load_hf_datasets(
+        args.dataset_source,
+        args.cache_dir,
+        args.local_dataset_root,
+    )
     corpus, queries, qrels = _cut_dataset(corpus, queries, qrels, args.max_corpus, args.max_queries)
 
     if not corpus or not queries or not qrels:
@@ -853,6 +949,7 @@ def main() -> None:
                 model_name=dense_model_resolved or "BAAI/bge-base-zh-v1.5",
                 batch_size=args.batch_size,
                 device=args.device,
+                max_chars=args.dense_max_chars,
             )
         else:
             if dense_config is None:
@@ -868,6 +965,7 @@ def main() -> None:
                 expected_dim=dense_config["expected_dim"],
                 use_dimensions=dense_config["use_dimensions"],
                 timeout_seconds=float(dense_config["timeout_seconds"]),
+                max_chars=args.dense_max_chars,
             )
         dense_metrics = _compute_metrics(dense_ranked, effective_qrels, ks)
         report["results"]["dense"] = {
@@ -877,6 +975,7 @@ def main() -> None:
             "model": dense_model_resolved,
             "batch_size": args.batch_size,
             "device": args.device,
+            "max_chars": args.dense_max_chars,
         }
         if args.dense_backend == "openai_compatible" and dense_config is not None:
             report["results"]["dense"].update(

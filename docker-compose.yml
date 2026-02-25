@@ -14,7 +14,13 @@ services:
       - "6379:6379"
 
   elasticsearch:
-    image: ${ES_IMAGE:-docker.io/library/elasticsearch:8.11.3}
+    image: ent_es_ik:${IK_VERSION:-8.11.3}
+    build:
+      context: .
+      dockerfile: docker/es/Dockerfile
+      args:
+        ES_IMAGE: ${ES_IMAGE:-docker.io/library/elasticsearch:8.11.3}
+        IK_VERSION: ${IK_VERSION:-8.11.3}
     container_name: ent_es
     environment:
       - discovery.type=single-node
@@ -32,12 +38,19 @@ services:
       - .env
     environment:
       - PYTHONPATH=/app
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
+      - HF_HOME=/data/hf-cache
+      - HUGGINGFACE_HUB_CACHE=/data/hf-cache
+      - TRANSFORMERS_CACHE=/data/hf-cache
+      - SENTENCE_TRANSFORMERS_HOME=/data/hf-cache
     command: gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000 app.main:app
     ports:
       - "${API_PORT:-18000}:8000"
     volumes:
       - ./:/app
       - ./data/knowledge:/data/knowledge
+      - ./data/hf-cache:/data/hf-cache
     depends_on:
       - redis
       - elasticsearch
@@ -49,10 +62,17 @@ services:
       - .env
     environment:
       - PYTHONPATH=/app
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
+      - HF_HOME=/data/hf-cache
+      - HUGGINGFACE_HUB_CACHE=/data/hf-cache
+      - TRANSFORMERS_CACHE=/data/hf-cache
+      - SENTENCE_TRANSFORMERS_HOME=/data/hf-cache
     command: celery -A worker.celery_app.celery_app worker -l info
     volumes:
       - ./:/app
       - ./data/knowledge:/data/knowledge
+      - ./data/hf-cache:/data/hf-cache
     depends_on:
       - redis
       - elasticsearch
@@ -64,10 +84,17 @@ services:
       - .env
     environment:
       - PYTHONPATH=/app
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
+      - HF_HOME=/data/hf-cache
+      - HUGGINGFACE_HUB_CACHE=/data/hf-cache
+      - TRANSFORMERS_CACHE=/data/hf-cache
+      - SENTENCE_TRANSFORMERS_HOME=/data/hf-cache
     command: python -m scripts.start_watcher
     volumes:
       - ./:/app
       - ./data/knowledge:/data/knowledge
+      - ./data/hf-cache:/data/hf-cache
     depends_on:
       - worker
 
@@ -97,9 +124,16 @@ services:
       - .env
     environment:
       - PYTHONPATH=/app
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
+      - HF_HOME=/data/hf-cache
+      - HUGGINGFACE_HUB_CACHE=/data/hf-cache
+      - TRANSFORMERS_CACHE=/data/hf-cache
+      - SENTENCE_TRANSFORMERS_HOME=/data/hf-cache
     command: python eval/run_duretrieval_baseline.py --method bm25 --top-k 10 --ks 1,3,5,10
     volumes:
       - ./:/app
+      - ./data/hf-cache:/data/hf-cache
     profiles:
       - eval
 

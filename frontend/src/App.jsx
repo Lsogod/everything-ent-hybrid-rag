@@ -322,6 +322,22 @@ function pickMetric(metrics, name, preferredK = 5) {
   return typeof fallback === 'number' ? fallback.toFixed(4) : '-';
 }
 
+function pickMetricValue(metrics, name, preferredK = 5) {
+  if (!metrics || typeof metrics !== 'object') return null;
+  const exact = metrics[`${name}@${preferredK}`];
+  if (typeof exact === 'number') return exact;
+  const key = Object.keys(metrics)
+    .filter((item) => item.startsWith(`${name}@`))
+    .sort((a, b) => {
+      const aK = Number(a.split('@')[1] || 0);
+      const bK = Number(b.split('@')[1] || 0);
+      return aK - bK;
+    })[0];
+  if (!key) return null;
+  const fallback = metrics[key];
+  return typeof fallback === 'number' ? fallback : null;
+}
+
 function statusLabel(status) {
   if (status === 'done') return '已完成';
   if (status === 'running') return '执行中';
@@ -617,10 +633,129 @@ function BaselineReportPanel({ latest, items }) {
       )}
       {!!items?.length && (
         <div className="history-list">
-          <h4>鍘嗗彶鎶ヨ〃</h4>
+          <h4>历史报表</h4>
           <ul>
             {items.slice(0, 6).map((item) => (
               <li key={item.file_name}>
+                <button
+                  type="button"
+                  className={`history-item-btn ${effectiveSelectedFileName === item.file_name ? 'is-active' : ''}`}
+                  onClick={() => setSelectedFileName(item.file_name)}
+                >
+                  <span>{item.file_name}</span>
+                  <small>{formatDateTime(item.created_at)}</small>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AnalyzerComparisonPanel({ latest, items }) {
+  const [selectedFileName, setSelectedFileName] = useState('');
+
+  const abItems = useMemo(
+    () =>
+      (items || []).filter(
+        (item) =>
+          item?.file_name?.includes('_es_ab') &&
+          item?.metrics &&
+          typeof item.metrics === 'object' &&
+          item.metrics.ik &&
+          item.metrics.standard,
+      ),
+    [items],
+  );
+
+  const effectiveSelectedFileName = useMemo(() => {
+    if (!abItems.length) return '';
+    if (selectedFileName && abItems.some((item) => item.file_name === selectedFileName)) {
+      return selectedFileName;
+    }
+    return abItems[0].file_name;
+  }, [abItems, selectedFileName]);
+
+  const activeSummary = useMemo(() => {
+    if (abItems.length) {
+      const matched = abItems.find((item) => item.file_name === effectiveSelectedFileName);
+      if (matched) return matched;
+      return abItems[0];
+    }
+    if (
+      latest?.file_name?.includes('_es_ab') &&
+      latest?.metrics?.ik &&
+      latest?.metrics?.standard
+    ) {
+      return latest;
+    }
+    return null;
+  }, [abItems, effectiveSelectedFileName, latest]);
+
+  const ikMetrics = activeSummary?.metrics?.ik || {};
+  const stdMetrics = activeSummary?.metrics?.standard || {};
+  const rows = [
+    ['hit@5', pickMetricValue(ikMetrics, 'hit', 5), pickMetricValue(stdMetrics, 'hit', 5)],
+    ['recall@5', pickMetricValue(ikMetrics, 'recall', 5), pickMetricValue(stdMetrics, 'recall', 5)],
+    ['mrr@10', pickMetricValue(ikMetrics, 'mrr', 10), pickMetricValue(stdMetrics, 'mrr', 10)],
+    ['map@10', pickMetricValue(ikMetrics, 'map', 10), pickMetricValue(stdMetrics, 'map', 10)],
+    ['ndcg@10', pickMetricValue(ikMetrics, 'ndcg', 10), pickMetricValue(stdMetrics, 'ndcg', 10)],
+  ];
+
+  return (
+    <section className="workflow">
+      <h2>IK vs standard 对比</h2>
+      {!activeSummary && <p className="muted">暂无 ES Analyzer A/B 报表，请先运行 run_es_analyzer_ab.py。</p>}
+      {!!activeSummary && (
+        <>
+          <div className="metric-row">
+            <span>dataset: {activeSummary.dataset || '-'}</span>
+            <span>report: {activeSummary.file_name || '-'}</span>
+            <span>created_at: {formatDateTime(activeSummary.created_at)}</span>
+            <span>queries: {activeSummary.counts?.queries ?? '-'}</span>
+          </div>
+          <div className="metric-row">
+            <span>ik_cost: {typeof activeSummary.method_cost_seconds?.ik === 'number' ? `${activeSummary.method_cost_seconds.ik.toFixed(3)} s` : '-'}</span>
+            <span>standard_cost: {typeof activeSummary.method_cost_seconds?.standard === 'number' ? `${activeSummary.method_cost_seconds.standard.toFixed(3)} s` : '-'}</span>
+            <span>total_cost: {typeof activeSummary.cost_seconds_total === 'number' ? `${activeSummary.cost_seconds_total.toFixed(3)} s` : '-'}</span>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>metric</th>
+                  <th>IK</th>
+                  <th>standard</th>
+                  <th>IK-standard</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(([name, ikValue, stdValue]) => {
+                  const delta = typeof ikValue === 'number' && typeof stdValue === 'number' ? ikValue - stdValue : null;
+                  return (
+                    <tr key={`ab-${name}`}>
+                      <td>{name}</td>
+                      <td>{typeof ikValue === 'number' ? ikValue.toFixed(4) : '-'}</td>
+                      <td>{typeof stdValue === 'number' ? stdValue.toFixed(4) : '-'}</td>
+                      <td className={delta == null ? '' : delta > 0 ? 'delta-pos' : delta < 0 ? 'delta-neg' : 'delta-zero'}>
+                        {typeof delta === 'number' ? `${delta >= 0 ? '+' : ''}${delta.toFixed(4)}` : '-'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {!!abItems.length && (
+        <div className="history-list">
+          <h4>A/B 报表历史</h4>
+          <ul>
+            {abItems.slice(0, 6).map((item) => (
+              <li key={`ab-${item.file_name}`}>
                 <button
                   type="button"
                   className={`history-item-btn ${effectiveSelectedFileName === item.file_name ? 'is-active' : ''}`}
@@ -1666,6 +1801,7 @@ export default function App() {
             </div>
           </section>
           <BaselineReportPanel latest={latestEvalReport} items={evalReports} />
+          <AnalyzerComparisonPanel latest={latestEvalReport} items={evalReports} />
         </>
       )}
 

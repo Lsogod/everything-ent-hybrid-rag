@@ -19,11 +19,14 @@ class Settings(BaseSettings):
     api_key: str | None = None
 
     embedding_mode: Literal["cloud", "local"] = "cloud"
+    embedding_backend_local: Literal["openai_compatible", "sentence_transformers"] = "openai_compatible"
     embedding_dim: int = 1024
     embedding_model_cloud: str = "text-embedding-v4"
-    embedding_model_local: str = "gte-Qwen2-1.5B-instruct"
+    embedding_model_local: str = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
     embedding_base_url_cloud: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     embedding_base_url_local: str = "http://host.docker.internal:8001/v1"
+    embedding_device_local: str | None = None
+    embedding_max_seq_len_local: int = 512
     embedding_use_dimensions: bool = True
     embedding_batch_size: int = 10
     dashscope_api_key: str | None = None
@@ -36,10 +39,13 @@ class Settings(BaseSettings):
 
     es_url: str = "http://localhost:9200"
     es_index: str = "ent_kb_chunks"
+    es_text_analyzer: str = "ik_max_word"
+    es_search_analyzer: str | None = "ik_smart"
     es_username: str | None = None
     es_password: str | None = None
     es_verify_certs: bool = False
     es_num_candidates: int = 100
+    index_with_vectors: bool = True
 
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str | None = None
