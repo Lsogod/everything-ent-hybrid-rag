@@ -1084,6 +1084,7 @@ export default function App() {
 
   const [health, setHealth] = useState(null);
   const [chunkCount, setChunkCount] = useState(0);
+  const [chunkStatsByPath, setChunkStatsByPath] = useState({});
   const [answer, setAnswer] = useState('');
   const [retrieval, setRetrieval] = useState(null);
   const [llmInput, setLlmInput] = useState(null);
@@ -1157,6 +1158,54 @@ export default function App() {
     () => describeScope(demoScopeResolved, visibleDocs),
     [demoScopeResolved, visibleDocs],
   );
+  const summaryScopeDocs = useMemo(() => {
+    if (activePage === 'chat') return [];
+    if (demoScopeResolved.mode === 'all') return visibleDocs || [];
+    const selected = new Set(demoScopeResolved.selectedIds || []);
+    return (visibleDocs || []).filter((item) => selected.has(item.id));
+  }, [activePage, demoScopeResolved.mode, demoScopeResolved.selectedIds, visibleDocs]);
+  const summaryDocTitle = useMemo(() => {
+    if (activePage === 'chat') return '';
+    if (!summaryScopeDocs.length) return '-';
+    if (summaryScopeDocs.length === 1) return summaryScopeDocs[0].title;
+    return `已选 ${summaryScopeDocs.length} 个文档`;
+  }, [activePage, summaryScopeDocs]);
+  const summaryDocPath = useMemo(() => {
+    if (activePage === 'chat') return '';
+    if (!summaryScopeDocs.length) return '-';
+    if (summaryScopeDocs.length === 1) return summaryScopeDocs[0].filePath;
+    return `${summaryScopeDocs[0].filePath} 等`;
+  }, [activePage, summaryScopeDocs]);
+  const summaryChunkPendingCount = useMemo(() => {
+    if (activePage === 'chat') return 0;
+    let pending = 0;
+    for (const doc of summaryScopeDocs) {
+      const path = String(doc.filePath || '').trim();
+      if (!path) continue;
+      if (typeof chunkStatsByPath[path] === 'number') continue;
+      if (typeof doc.chunkCount === 'number') continue;
+      if (summaryScopeDocs.length === 1 && path === docPath) continue;
+      pending += 1;
+    }
+    return pending;
+  }, [activePage, summaryScopeDocs, chunkStatsByPath, docPath]);
+  const summaryChunkCount = useMemo(() => {
+    if (activePage === 'chat') return chatMessages.length;
+    if (!summaryScopeDocs.length) return 0;
+    let total = 0;
+    for (const doc of summaryScopeDocs) {
+      const path = String(doc.filePath || '').trim();
+      if (!path) continue;
+      if (typeof chunkStatsByPath[path] === 'number') {
+        total += chunkStatsByPath[path];
+      } else if (typeof doc.chunkCount === 'number') {
+        total += doc.chunkCount;
+      } else if (summaryScopeDocs.length === 1 && path === docPath) {
+        total += chunkCount || 0;
+      }
+    }
+    return total;
+  }, [activePage, summaryScopeDocs, chunkStatsByPath, chatMessages.length, docPath, chunkCount]);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -1253,6 +1302,39 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePage, selectedSessionId]);
 
+  useEffect(() => {
+    if (activePage === 'chat') return;
+    const filePaths = summaryScopeDocs
+      .map((item) => String(item.filePath || '').trim())
+      .filter((value, index, arr) => value && arr.indexOf(value) === index);
+    const missing = filePaths.filter((path) => typeof chunkStatsByPath[path] !== 'number');
+    if (!missing.length) return;
+    let cancelled = false;
+    (async () => {
+      const resolved = await Promise.all(
+        missing.map(async (path) => {
+          try {
+            const stats = await apiGet(apiBase, `/api/v1/debug/file-stats?file_path=${encodeURIComponent(path)}`);
+            return [path, Number(stats.chunk_count || 0)];
+          } catch {
+            return [path, 0];
+          }
+        }),
+      );
+      if (cancelled) return;
+      setChunkStatsByPath((prev) => {
+        const next = { ...prev };
+        for (const [path, count] of resolved) {
+          next[path] = count;
+        }
+        return next;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activePage, summaryScopeDocs, chunkStatsByPath, apiBase]);
+
   function patchStep(id, patch) {
     setSteps((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   }
@@ -1286,8 +1368,14 @@ export default function App() {
       ]);
       setHealth(healthData);
       setChunkCount(statsData.chunk_count || 0);
+      setChunkStatsByPath((prev) => ({
+        ...prev,
+        [filePath]: Number(statsData.chunk_count || 0),
+      }));
+      return statsData;
     } catch {
       setHealth({ status: 'error' });
+      return null;
     }
   }
 
@@ -1307,6 +1395,15 @@ export default function App() {
         modifiedAt: item.modified_at || '',
       }));
       setUserDocs(mapped);
+      setChunkStatsByPath((prev) => {
+        const next = { ...prev };
+        for (const item of mapped) {
+          const path = String(item.filePath || '').trim();
+          if (!path) continue;
+          next[path] = Number(item.chunkCount || 0);
+        }
+        return next;
+      });
 
       if (!mapped.length) {
         setDeletePath('');
@@ -1454,6 +1551,10 @@ export default function App() {
       }),
     );
     if (payload) {
+      setChunkStatsByPath((prev) => ({
+        ...prev,
+        [targetPath]: 0,
+      }));
       if (deleteSourceFile) {
         setUserDocs((prev) => prev.filter((item) => item.filePath !== targetPath));
       }
@@ -2004,14 +2105,20 @@ export default function App() {
             </>
           ) : (
             <>
-              <p>{selectedDoc.title}</p>
-              <p className="muted">{docPath}</p>
+              <p>{summaryDocTitle}</p>
+              <p className="muted">{summaryDocPath}</p>
             </>
           )}
         </article>
         <article>
           <h2>{activePage === 'chat' ? '消息数量' : '已入库 Chunk'}</h2>
-          <p>{activePage === 'chat' ? chatMessages.length : chunkCount}</p>
+          <p>{activePage === 'chat' ? chatMessages.length : summaryChunkCount}</p>
+          {activePage !== 'chat' && (
+            <p className="muted">
+              {demoScopeResolved.mode === 'all' ? '全库合计' : '所选范围合计'}
+              {summaryChunkPendingCount > 0 ? `（${summaryChunkPendingCount} 个文档统计中）` : ''}
+            </p>
+          )}
         </article>
         <article>
           <h2>执行账号</h2>
