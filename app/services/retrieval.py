@@ -108,6 +108,9 @@ class HybridRetriever:
 
         return {
             "query": query,
+            "strategy": {
+                "mode": "classic",
+            },
             "scope": {
                 "mode": "filtered" if scope_paths else "all",
                 "file_count": len(scope_paths),

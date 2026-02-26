@@ -25,6 +25,7 @@ from app.schemas.index import (
     UploadListResponse,
 )
 from app.schemas.qa import AskRequest
+from app.services.agentic import AgenticRAGService
 from app.services.chat_history import ChatHistoryService
 from app.services.llm import LLMClient, sse_pack
 from app.services.rbac import RBACService
@@ -184,7 +185,85 @@ async def ask(
 
     async def event_stream():
         conversation_id = payload.conversation_id or uuid4().hex
-        docs, trace = await retriever.retrieve_with_trace(payload.query, payload.file_paths)
+        agent_events: list[dict] = []
+
+        if payload.route == "auto":
+            route_decision = llm.classify_route(payload.query)
+            route = route_decision.get("route", "rag")
+        elif payload.route == "chat":
+            route_decision = {
+                "route": "chat",
+                "confidence": 1.0,
+                "source": "manual",
+                "reason": "forced by request.route",
+            }
+            route = "chat"
+        else:
+            route_decision = {
+                "route": "rag",
+                "confidence": 1.0,
+                "source": "manual",
+                "reason": "forced by request.route",
+            }
+            route = "rag"
+
+        if payload.debug:
+            yield sse_pack({"type": "intent", "intent": route_decision})
+
+        if route == "chat":
+            docs: list[dict] = []
+            trace = {
+                "query": payload.query,
+                "strategy": {
+                    "route": "chat",
+                    "mode": "chat",
+                },
+                "scope": {
+                    "mode": "none",
+                    "file_count": 0,
+                    "file_paths": [],
+                },
+                "timing_ms": {},
+                "keyword": {"top_k": 0, "count": 0, "hits": []},
+                "vector": {"top_k": 0, "count": 0, "hits": []},
+                "fusion": {"top_k": 0, "count": 0, "hits": [], "detailed_hits": [], "dropped_candidates": []},
+                "metrics": {
+                    "keyword_unique": 0,
+                    "vector_unique": 0,
+                    "union_unique": 0,
+                    "overlap_unique": 0,
+                    "overlap_rate": 0.0,
+                    "fusion_gain": 0,
+                },
+                "flow": {
+                    "keyword_candidates": 0,
+                    "vector_candidates": 0,
+                    "union_candidates": 0,
+                    "overlap_candidates": 0,
+                    "final_selected": 0,
+                    "dropped_candidates": 0,
+                },
+                "intent": route_decision,
+            }
+        elif payload.mode == "agentic":
+            agent = AgenticRAGService(retriever, llm)
+            docs, trace, agent_events = await agent.run(
+                query=payload.query,
+                file_paths=payload.file_paths,
+                max_iterations=payload.agent_max_iterations,
+                max_sub_queries=payload.agent_max_sub_queries,
+            )
+            trace["strategy"]["route"] = "rag"
+            trace["intent"] = route_decision
+        else:
+            docs, trace = await retriever.retrieve_with_trace(payload.query, payload.file_paths)
+            trace["strategy"] = {"mode": "classic", "route": "rag"}
+            trace["intent"] = route_decision
+
+        if payload.debug:
+            for event in agent_events:
+                yield sse_pack(event)
+
         citations = [
             {
                 "index": idx,
@@ -207,9 +286,22 @@ async def ask(
         )
         if payload.debug:
             yield sse_pack({"type": "trace", "trace": trace})
-            yield sse_pack({"type": "llm_input", "llm_input": llm.build_debug_payload(payload.query, docs)})
+            yield sse_pack(
+                {
+                    "type": "llm_input",
+                    "llm_input": llm.build_debug_payload(
+                        payload.query,
+                        docs,
+                        mode=str((trace or {}).get("strategy", {}).get("mode", payload.mode)),
+                    ),
+                }
+            )
         answer_parts: list[str] = []
-        async for token in llm.stream_answer(payload.query, docs):
+        if route == "chat":
+            token_stream = llm.stream_chat_answer(payload.query)
+        else:
+            token_stream = llm.stream_answer(payload.query, docs)
+        async for token in token_stream:
             answer_parts.append(token)
             yield sse_pack({"type": "token", "text": token})
         await asyncio.to_thread(

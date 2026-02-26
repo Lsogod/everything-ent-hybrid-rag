@@ -1052,6 +1052,27 @@ tbody tr:hover {
   margin-bottom: 14px;
 }
 
+.chat-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.qa-mode-select {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  gap: 6px;
+}
+
+.qa-mode-select select {
+  min-width: 160px;
+  font-size: 13px;
+  padding: 8px 28px 8px 10px;
+}
+
 .chat-stream {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -1349,6 +1370,19 @@ tbody tr:hover {
 
   .chat-layout {
     grid-template-columns: 1fr;
+  }
+
+  .chat-main-head {
+    align-items: flex-start;
+  }
+
+  .chat-head-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .qa-mode-select {
+    min-width: 200px;
   }
 
   .chat-stream {

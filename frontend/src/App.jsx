@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 
 const DEFAULT_USER_ID = import.meta.env.VITE_USER_ID || 'admin';
@@ -104,6 +104,10 @@ const DEMO_DOC_LIBRARY = [
 ];
 
 const EVAL_DOC_LIBRARY = DURETRIEVAL_DOCS;
+const QA_MODES = [
+  { id: 'classic', label: 'Classic RAG' },
+  { id: 'agentic', label: 'Agentic RAG' },
+];
 
 const DEFAULT_DOC = DEMO_DOC_LIBRARY[0];
 const DEFAULT_QUESTION = DEFAULT_DOC.examples[0];
@@ -148,7 +152,7 @@ function createConversationId() {
   return `chat-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
-function createSteps(query, filePath, docTitle, retrievalScope = null) {
+function createSteps(query, filePath, docTitle, retrievalScope = null, qaMode = 'classic') {
   const scopeMode = retrievalScope?.mode || 'all';
   const scopeFilePaths = Array.isArray(retrievalScope?.file_paths) ? retrievalScope.file_paths : [];
   return [
@@ -216,6 +220,7 @@ function createSteps(query, filePath, docTitle, retrievalScope = null) {
         method: 'POST(SSE)',
         query,
         debug: true,
+        mode: qaMode,
         scope_mode: scopeMode,
         file_paths: scopeFilePaths,
       },
@@ -687,6 +692,63 @@ function FlowList({ flow }) {
   );
 }
 
+function AgentStepPanel({ trace, events = [] }) {
+  const traceSteps = Array.isArray(trace?.agent?.steps) ? trace.agent.steps : [];
+  const eventSteps = Array.isArray(events)
+    ? events
+        .filter((item) => item?.type === 'agent_step' && item?.agent_step)
+        .map((item) => item.agent_step)
+    : [];
+  const steps = traceSteps.length ? traceSteps : eventSteps;
+
+  const planFromTrace = trace?.agent?.plan || null;
+  const planFromEvents =
+    (Array.isArray(events) && events.find((item) => item?.type === 'agent_plan')?.agent_plan) || null;
+  const plan = planFromTrace || planFromEvents;
+  const stopReason =
+    trace?.agent?.stop_reason
+    || (Array.isArray(events) && events.find((item) => item?.type === 'agent_done')?.agent_done?.stop_reason)
+    || '-';
+
+  if (!steps.length && !plan) return null;
+
+  return (
+    <section className="trace-block">
+      <h4>Agent 规划与执行</h4>
+      <div className="metric-row">
+        <span>planner: {plan?.planner || '-'}</span>
+        <span>goal: {plan?.goal || trace?.query || '-'}</span>
+        <span>iterations: {trace?.agent?.iterations ?? steps.length}</span>
+        <span>stop_reason: {stopReason}</span>
+      </div>
+      {!!plan?.sub_queries?.length && (
+        <div className="metric-row">
+          {plan.sub_queries.map((item, idx) => (
+            <span key={`agent-subq-${idx}`}>Q{idx + 1}: {item}</span>
+          ))}
+        </div>
+      )}
+      {!!steps.length && (
+        <ul className="compact-list">
+          {steps.map((item, idx) => (
+            <li key={`agent-step-${idx}`}>
+              <div className="message-head">
+                <strong>Step {item.iteration || idx + 1}</strong>
+                <small>{item.query || '-'}</small>
+              </div>
+              <div className="metric-row">
+                <span>context: {item.context_count ?? '-'}</span>
+                <span>fusion: {item.fusion_count ?? '-'}</span>
+                <span>total_ms: {formatMs(item.timing_ms?.total)}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function FusionTable({ rows, onOpenChunk, sourceTitle }) {
   if (!rows?.length) return <p className="muted">无融合明细</p>;
   return (
@@ -1114,6 +1176,7 @@ export default function App() {
   const [sessionMessages, setSessionMessages] = useState([]);
   const [chatHint, setChatHint] = useState('');
   const [chatError, setChatError] = useState('');
+  const [qaMode, setQaMode] = useState('classic');
   const [chatConversationId, setChatConversationId] = useState(() => createConversationId());
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState([]);
@@ -1122,9 +1185,12 @@ export default function App() {
   const [chatTrace, setChatTrace] = useState(null);
   const [chatLlmInput, setChatLlmInput] = useState(null);
   const [chatCitations, setChatCitations] = useState([]);
+  const [chatAgentEvents, setChatAgentEvents] = useState([]);
   const [pendingUploadFile, setPendingUploadFile] = useState(null);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [uploadInputKey, setUploadInputKey] = useState(0);
+  const chatStreamRef = useRef(null);
+  const chatShouldAutoScrollRef = useRef(true);
 
   const apiBase = useMemo(() => import.meta.env.VITE_API_BASE_URL || '', []);
   const normalizedChatCustomIds = useMemo(
@@ -1207,6 +1273,20 @@ export default function App() {
     return total;
   }, [activePage, summaryScopeDocs, chunkStatsByPath, chatMessages.length, docPath, chunkCount]);
 
+  function scrollChatToBottom(force = false) {
+    const node = chatStreamRef.current;
+    if (!node) return;
+    if (!force && !chatShouldAutoScrollRef.current) return;
+    node.scrollTop = node.scrollHeight;
+  }
+
+  function handleChatStreamScroll() {
+    const node = chatStreamRef.current;
+    if (!node) return;
+    const distanceToBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+    chatShouldAutoScrollRef.current = distanceToBottom <= 72;
+  }
+
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
@@ -1247,7 +1327,7 @@ export default function App() {
       createSteps(selectedDoc.examples[0] || DEFAULT_QUESTION, selectedDoc.filePath, selectedDoc.title, {
         mode: demoScopeResolved.mode,
         file_paths: demoScopeFilePaths,
-      }),
+      }, qaMode),
     );
     if (selectedDoc.filePath.includes('/uploads/')) {
       setDeletePath(selectedDoc.filePath);
@@ -1279,6 +1359,7 @@ export default function App() {
               ...item,
               input: {
                 ...item.input,
+                mode: qaMode,
                 scope_mode: demoScopeResolved.mode,
                 file_paths: demoScopeFilePaths,
               },
@@ -1286,7 +1367,7 @@ export default function App() {
           : item,
       ),
     );
-  }, [activePage, demoScopeResolved.mode, demoScopeFilePaths]);
+  }, [activePage, demoScopeResolved.mode, demoScopeFilePaths, qaMode]);
 
   useEffect(() => {
     const first = visibleDocs[0];
@@ -1301,6 +1382,18 @@ export default function App() {
     refreshSessionMessages(selectedSessionId, messageLimit, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePage, selectedSessionId]);
+
+  useEffect(() => {
+    if (activePage !== 'chat') return;
+    const raf = requestAnimationFrame(() => scrollChatToBottom(true));
+    return () => cancelAnimationFrame(raf);
+  }, [activePage, selectedSessionId]);
+
+  useEffect(() => {
+    if (activePage !== 'chat') return;
+    const raf = requestAnimationFrame(() => scrollChatToBottom(false));
+    return () => cancelAnimationFrame(raf);
+  }, [activePage, chatMessages, chatStreaming]);
 
   useEffect(() => {
     if (activePage === 'chat') return;
@@ -1583,6 +1676,7 @@ export default function App() {
       const items = Array.isArray(payload.items) ? payload.items : [];
       setSessionMessages(items);
       if (syncToChat) {
+        chatShouldAutoScrollRef.current = true;
         const normalized = items.map((item) => ({
           id: item.id || `${item.role || 'assistant'}-${item.created_at || Date.now()}`,
           role: item.role || 'assistant',
@@ -1595,6 +1689,7 @@ export default function App() {
         setChatTrace(null);
         setChatLlmInput(null);
         setChatCitations([]);
+        setChatAgentEvents([]);
       }
       setChatHint(`已加载 ${items.length} 条会话消息`);
     } catch (err) {
@@ -1642,6 +1737,7 @@ export default function App() {
   }
 
   function startNewConversation() {
+    chatShouldAutoScrollRef.current = true;
     setSelectedSessionId('');
     setSessionMessages([]);
     setChatMessages([]);
@@ -1649,6 +1745,7 @@ export default function App() {
     setChatTrace(null);
     setChatLlmInput(null);
     setChatCitations([]);
+    setChatAgentEvents([]);
     setChatConversationId(createConversationId());
     setChatHint('已创建新会话，可以直接提问。');
   }
@@ -1669,11 +1766,13 @@ export default function App() {
 
     const userMessageId = `user-${Date.now()}`;
     const assistantMessageId = `assistant-${Date.now() + 1}`;
+    chatShouldAutoScrollRef.current = true;
     setChatInput('');
     setChatError('');
     setChatTrace(null);
     setChatLlmInput(null);
     setChatCitations([]);
+    setChatAgentEvents([]);
     setChatStreaming(true);
 
     setChatMessages((prev) => [
@@ -1700,6 +1799,9 @@ export default function App() {
         conversation_id: conversationId,
         user_id: DEFAULT_USER_ID,
         debug: chatDebugMode,
+        mode: qaMode,
+        agent_max_iterations: 2,
+        agent_max_sub_queries: 3,
         file_paths: chatScopeFilePaths.length ? chatScopeFilePaths : null,
       };
 
@@ -1739,6 +1841,10 @@ export default function App() {
           if (event.type === 'context') {
             citations = event.citations || [];
             setChatCitations(citations);
+            continue;
+          }
+          if (String(event.type || '').startsWith('agent_')) {
+            setChatAgentEvents((prev) => [...prev, event]);
             continue;
           }
           if (event.type === 'trace') {
@@ -1799,6 +1905,9 @@ export default function App() {
       conversation_id: null,
       user_id: DEFAULT_USER_ID,
       debug: true,
+      mode: qaMode,
+      agent_max_iterations: 2,
+      agent_max_sub_queries: 3,
       file_paths: scopedFilePaths.length ? scopedFilePaths : null,
     };
 
@@ -1822,6 +1931,7 @@ export default function App() {
     let trace = null;
     let llmInputPayload = null;
     let fullAnswer = '';
+    const agentEvents = [];
 
     while (true) {
       const { value, done } = await reader.read();
@@ -1842,6 +1952,10 @@ export default function App() {
         if (event.type === 'context') {
           contextCount = event.count || 0;
           citations = event.citations || [];
+          continue;
+        }
+        if (String(event.type || '').startsWith('agent_')) {
+          agentEvents.push(event);
           continue;
         }
 
@@ -1868,7 +1982,7 @@ export default function App() {
       }
     }
 
-    setRetrieval({ contextCount, citations, trace });
+    setRetrieval({ contextCount, citations, trace, agentEvents });
 
     return {
       context_count: contextCount,
@@ -1880,6 +1994,7 @@ export default function App() {
       fusion_gain: trace?.metrics?.fusion_gain ?? 0,
       timing_ms: trace?.timing_ms || null,
       flow: trace?.flow || null,
+      agent_events: agentEvents,
       fusion_preview: (trace?.fusion?.detailed_hits || []).slice(0, 5),
       llm_input: llmInputPayload,
       answer_length: fullAnswer.length,
@@ -1903,7 +2018,7 @@ export default function App() {
       createSteps(queryText, activeDoc.filePath, activeDoc.title, {
         mode: demoScopeResolved.mode,
         file_paths: demoScopeFilePaths,
-      }),
+      }, qaMode),
     );
 
     try {
@@ -1936,6 +2051,7 @@ export default function App() {
               ...item,
               input: {
                 ...item.input,
+                mode: qaMode,
                 scope_mode: demoScopeResolved.mode,
                 file_paths: demoScopeFilePaths,
               },
@@ -2178,9 +2294,21 @@ export default function App() {
                 <h2>用户问答窗口</h2>
                 <p className="muted">conversation_id: {chatConversationId || '-'}</p>
               </div>
-              <button type="button" className="ghost" onClick={() => setChatDebugMode((prev) => !prev)}>
-                {chatDebugMode ? '关闭开发者模式' : '开启开发者模式'}
-              </button>
+              <div className="chat-head-actions">
+                <label className="qa-mode-select">
+                  问答模式
+                  <select value={qaMode} onChange={(event) => setQaMode(event.target.value)} disabled={chatStreaming}>
+                    {QA_MODES.map((item) => (
+                      <option key={`chat-mode-${item.id}`} value={item.id}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" className="ghost" onClick={() => setChatDebugMode((prev) => !prev)}>
+                  {chatDebugMode ? '关闭开发者模式' : '开启开发者模式'}
+                </button>
+              </div>
             </div>
             <section className="scope-panel">
               <p className="muted">检索范围：{chatScopeLabel}</p>
@@ -2192,7 +2320,7 @@ export default function App() {
               />
             </section>
 
-            <div className="chat-stream">
+            <div className="chat-stream" ref={chatStreamRef} onScroll={handleChatStreamScroll}>
               {!chatMessages.length && <p className="muted">输入问题后即可开始对话，答案会流式返回。</p>}
               {!!chatMessages.length &&
                 chatMessages.map((item) => (
@@ -2282,6 +2410,11 @@ export default function App() {
                     placeholder="给知识库助手发送消息（Enter 发送，Shift+Enter 换行）"
                     rows={2}
                     onKeyDown={(event) => {
+                      const nativeEvent = event.nativeEvent;
+                      const composing = Boolean(
+                        event.isComposing || nativeEvent?.isComposing || nativeEvent?.keyCode === 229,
+                      );
+                      if (composing) return;
                       if (event.key === 'Enter' && !event.shiftKey) {
                         event.preventDefault();
                         sendChatMessage();
@@ -2312,6 +2445,7 @@ export default function App() {
                   <>
                     <div className="metric-row">
                       <span>context: {chatCitations.length}</span>
+                      <span>mode: {chatTrace.strategy?.mode || qaMode}</span>
                       <span>scope: {chatTrace.scope?.mode || 'all'} ({chatTrace.scope?.file_count ?? 0})</span>
                       <span>keyword: {chatTrace.keyword?.count ?? 0}</span>
                       <span>vector: {chatTrace.vector?.count ?? 0}</span>
@@ -2319,6 +2453,7 @@ export default function App() {
                       <span>overlap_rate: {formatPercent(chatTrace.metrics?.overlap_rate)}</span>
                       <span>total_ms: {formatMs(chatTrace.timing_ms?.total)}</span>
                     </div>
+                    <AgentStepPanel trace={chatTrace} events={chatAgentEvents} />
                     <div className="trace-grid trace-grid-2">
                       <section className="trace-block">
                         <h4>阶段耗时</h4>
@@ -2399,6 +2534,16 @@ export default function App() {
             disabled={running}
           />
         </section>
+        <label>
+          问答模式
+          <select value={qaMode} onChange={(event) => setQaMode(event.target.value)} disabled={running}>
+            {QA_MODES.map((item) => (
+              <option key={`demo-mode-${item.id}`} value={item.id}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <div className="chip-list">
           {selectedDoc.examples.map((item) => (
             <button key={item} type="button" className="chip" onClick={() => setQuestion(item)}>
@@ -2805,6 +2950,7 @@ export default function App() {
           <>
             <div className="metric-row">
               <span>context: {retrieval.contextCount}</span>
+              <span>mode: {retrieval.trace.strategy?.mode || qaMode}</span>
               <span>scope: {retrieval.trace.scope?.mode || 'all'} ({retrieval.trace.scope?.file_count ?? 0})</span>
               <span>keyword: {retrieval.trace.keyword?.count ?? 0}</span>
               <span>vector: {retrieval.trace.vector?.count ?? 0}</span>
@@ -2813,6 +2959,7 @@ export default function App() {
               <span>fusion_gain: {retrieval.trace.metrics?.fusion_gain ?? 0}</span>
               <span>total_ms: {formatMs(retrieval.trace.timing_ms?.total)}</span>
             </div>
+            <AgentStepPanel trace={retrieval.trace} events={retrieval.agentEvents || []} />
             <div className="trace-grid trace-grid-2">
               <section className="trace-block">
                 <h4>阶段耗时</h4>
