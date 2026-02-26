@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.config import get_settings
@@ -15,7 +17,13 @@ from app.infra.es import ElasticsearchStore
 from app.infra.queue import celery_app
 from app.schemas.admin import PermissionCreateRequest, RoleCreateRequest
 from app.schemas.chat import MessagesResponse, SessionsResponse
-from app.schemas.index import IndexFileRequest, TaskResponse
+from app.schemas.index import (
+    IndexFileRequest,
+    TaskResponse,
+    UploadFileItem,
+    UploadIndexResponse,
+    UploadListResponse,
+)
 from app.schemas.qa import AskRequest
 from app.services.chat_history import ChatHistoryService
 from app.services.llm import LLMClient, sse_pack
@@ -28,6 +36,19 @@ SAMPLE_DOC_URL = "https://raw.githubusercontent.com/fastapi/fastapi/master/READM
 SAMPLE_DOC_NAME = "fastapi_official_readme.md"
 DATASET_MANIFEST = "datasets/duretrieval_manifest.json"
 REPORTS_DIR = Path(__file__).resolve().parents[2] / "eval" / "reports"
+UPLOAD_DIR_NAME = "uploads"
+
+
+def _normalize_upload_file_name(raw_name: str | None) -> str:
+    name = Path((raw_name or "").strip()).name
+    if not name:
+        raise HTTPException(status_code=400, detail="empty file name")
+
+    # Keep filename predictable and avoid special characters in runtime paths.
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    if not safe:
+        raise HTTPException(status_code=400, detail="invalid file name")
+    return safe
 
 
 @router.post("/index/file", response_model=TaskResponse)
@@ -57,8 +78,91 @@ async def delete_file(
         Path(settings.knowledge_root).resolve()
     ):
         raise HTTPException(status_code=403, detail="file path is outside knowledge_root")
-    task = celery_app.send_task("worker.tasks.delete_file", args=[file_path])
+    task = celery_app.send_task("worker.tasks.delete_file", args=[file_path, payload.delete_source])
     return TaskResponse(task_id=task.id, message=f"delete task queued: {file_path}")
+
+
+@router.post("/index/upload", response_model=UploadIndexResponse)
+async def upload_and_index_file(
+    file: UploadFile = File(...),
+    _: str = Depends(require_permission("kb:index")),
+) -> UploadIndexResponse:
+    file_name = _normalize_upload_file_name(file.filename)
+    ext = Path(file_name).suffix.lower()
+    if settings.allowed_extensions and ext not in settings.allowed_extensions:
+        allowed = ",".join(sorted(settings.allowed_extensions))
+        raise HTTPException(status_code=400, detail=f"extension not allowed: {ext}; allowed={allowed}")
+
+    upload_root = Path(settings.knowledge_root).resolve() / UPLOAD_DIR_NAME
+    upload_root.mkdir(parents=True, exist_ok=True)
+
+    stem = Path(file_name).stem
+    suffix = Path(file_name).suffix
+    target = upload_root / f"{stem}_{uuid4().hex[:8]}{suffix}"
+    max_size = settings.max_file_size_mb * 1024 * 1024
+    size = 0
+
+    try:
+        with target.open("wb") as output:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_size:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"file too large, max={settings.max_file_size_mb}MB",
+                    )
+                output.write(chunk)
+    except HTTPException:
+        if target.exists():
+            target.unlink(missing_ok=True)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if target.exists():
+            target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"failed to save upload: {exc}") from exc
+    finally:
+        await file.close()
+
+    task = celery_app.send_task("worker.tasks.index_file", args=[str(target)])
+    return UploadIndexResponse(
+        task_id=task.id,
+        status="queued",
+        message=f"upload saved and index task queued: {target}",
+        file_name=file_name,
+        file_path=str(target),
+        size_bytes=size,
+    )
+
+
+@router.get("/index/uploads", response_model=UploadListResponse)
+async def list_uploaded_files(
+    _: str = Depends(require_permission("kb:index")),
+) -> UploadListResponse:
+    upload_root = Path(settings.knowledge_root).resolve() / UPLOAD_DIR_NAME
+    if not upload_root.exists():
+        return UploadListResponse(items=[])
+
+    store = ElasticsearchStore()
+    files: list[UploadFileItem] = []
+    for item in sorted(upload_root.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+        if not item.is_file():
+            continue
+        resolved = str(item.resolve())
+        chunk_count = store.count_by_file(resolved)
+        files.append(
+            UploadFileItem(
+                file_name=item.name,
+                file_path=resolved,
+                size_bytes=item.stat().st_size,
+                modified_at=datetime.fromtimestamp(item.stat().st_mtime).isoformat(),
+                chunk_count=chunk_count,
+                indexed=chunk_count > 0,
+            )
+        )
+    return UploadListResponse(items=files)
 
 
 @router.post("/qa/ask")
@@ -80,13 +184,15 @@ async def ask(
 
     async def event_stream():
         conversation_id = payload.conversation_id or uuid4().hex
-        docs, trace = await retriever.retrieve_with_trace(payload.query)
+        docs, trace = await retriever.retrieve_with_trace(payload.query, payload.file_paths)
         citations = [
             {
                 "index": idx,
                 "file_path": item.get("file_path"),
                 "file_name": item.get("file_name"),
                 "chunk_id": item.get("chunk_id"),
+                "chunk_preview": str(item.get("content") or "").replace("\n", " ").strip()[:280],
+                "chunk_content": str(item.get("content") or ""),
             }
             for idx, item in enumerate(docs, start=1)
         ]

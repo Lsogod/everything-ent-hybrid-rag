@@ -15,8 +15,8 @@ def index_file(file_path: str) -> dict:
 
 
 @celery_app.task(name="worker.tasks.delete_file")
-def delete_file(file_path: str) -> dict:
+def delete_file(file_path: str, delete_source: bool = False) -> dict:
     service = IndexerService()
-    result = service.delete_file(file_path)
+    result = service.delete_file(file_path, delete_source=delete_source)
     logger.info("delete_file result=%s", result)
     return result

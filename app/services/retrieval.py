@@ -16,11 +16,16 @@ class HybridRetriever:
         self.store = ElasticsearchStore()
         self.embedding_client = EmbeddingFactory.create()
 
-    async def retrieve(self, query: str) -> list[dict[str, Any]]:
-        docs, _ = await self.retrieve_with_trace(query)
+    async def retrieve(self, query: str, file_paths: list[str] | None = None) -> list[dict[str, Any]]:
+        docs, _ = await self.retrieve_with_trace(query, file_paths)
         return docs
 
-    async def retrieve_with_trace(self, query: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    async def retrieve_with_trace(
+        self,
+        query: str,
+        file_paths: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        scope_paths = self._normalize_file_paths(file_paths)
         total_started = time.perf_counter()
         embedding_started = time.perf_counter()
         query_vector = await asyncio.to_thread(self.embedding_client.embed_query, query)
@@ -32,12 +37,14 @@ class HybridRetriever:
             self.store.keyword_search,
             query,
             self.settings.retrieval_top_k_keyword,
+            scope_paths,
         )
         vector_task = asyncio.to_thread(
             self._timed_search,
             self.store.vector_search,
             query_vector,
             self.settings.retrieval_top_k_vector,
+            scope_paths,
         )
         (keyword_hits, keyword_ms), (vector_hits, vector_ms) = await asyncio.gather(keyword_task, vector_task)
         parallel_search_ms = (time.perf_counter() - search_started) * 1000
@@ -57,13 +64,23 @@ class HybridRetriever:
             "total": round(total_ms, 2),
         }
 
-        trace = self._build_trace(query, query_vector, keyword_hits, vector_hits, merged, final_hits, timing_ms)
+        trace = self._build_trace(
+            query,
+            query_vector,
+            scope_paths,
+            keyword_hits,
+            vector_hits,
+            merged,
+            final_hits,
+            timing_ms,
+        )
         return final_hits, trace
 
     def _build_trace(
         self,
         query: str,
         query_vector: list[float],
+        scope_paths: list[str],
         keyword_hits: list[dict[str, Any]],
         vector_hits: list[dict[str, Any]],
         merged_hits: list[dict[str, Any]],
@@ -91,6 +108,11 @@ class HybridRetriever:
 
         return {
             "query": query,
+            "scope": {
+                "mode": "filtered" if scope_paths else "all",
+                "file_count": len(scope_paths),
+                "file_paths": scope_paths,
+            },
             "timing_ms": timing_ms,
             "embedding": {
                 "dimension": len(query_vector),
@@ -135,6 +157,20 @@ class HybridRetriever:
                 "dropped_candidates": max(len(union_ids) - len(final_hits), 0),
             },
         }
+
+    @staticmethod
+    def _normalize_file_paths(file_paths: list[str] | None) -> list[str]:
+        if not file_paths:
+            return []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in file_paths:
+            value = str(raw or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
 
     @staticmethod
     def _serialize_hit(item: dict[str, Any]) -> dict[str, Any]:

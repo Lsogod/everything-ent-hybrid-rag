@@ -82,23 +82,36 @@ class ElasticsearchStore:
         if operations:
             self.client.bulk(operations=operations, refresh=True)
 
-    def keyword_search(self, query: str, top_k: int) -> list[dict[str, Any]]:
+    def keyword_search(self, query: str, top_k: int, file_paths: list[str] | None = None) -> list[dict[str, Any]]:
+        file_filter = self._build_file_filter(file_paths)
+        query_body: dict[str, Any] = {"match": {"content": {"query": query}}}
+        if file_filter:
+            query_body = {
+                "bool": {
+                    "must": [{"match": {"content": {"query": query}}}],
+                    "filter": [file_filter],
+                }
+            }
         response = self.client.search(
             index=self.settings.es_index,
             size=top_k,
-            query={"match": {"content": {"query": query}}},
+            query=query_body,
         )
         return self._extract_hits(response)
 
-    def vector_search(self, vector: list[float], top_k: int) -> list[dict[str, Any]]:
+    def vector_search(self, vector: list[float], top_k: int, file_paths: list[str] | None = None) -> list[dict[str, Any]]:
+        file_filter = self._build_file_filter(file_paths)
+        knn_body: dict[str, Any] = {
+            "field": "vector",
+            "query_vector": vector,
+            "k": top_k,
+            "num_candidates": max(top_k * 4, self.settings.es_num_candidates),
+        }
+        if file_filter:
+            knn_body["filter"] = file_filter
         response = self.client.search(
             index=self.settings.es_index,
-            knn={
-                "field": "vector",
-                "query_vector": vector,
-                "k": top_k,
-                "num_candidates": max(top_k * 4, self.settings.es_num_candidates),
-            },
+            knn=knn_body,
             size=top_k,
         )
         return self._extract_hits(response)
@@ -135,3 +148,19 @@ class ElasticsearchStore:
                 }
             )
         return output
+
+    @staticmethod
+    def _build_file_filter(file_paths: list[str] | None) -> dict[str, Any] | None:
+        if not file_paths:
+            return None
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in file_paths:
+            value = str(raw or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        if not normalized:
+            return None
+        return {"terms": {"file_path": normalized}}

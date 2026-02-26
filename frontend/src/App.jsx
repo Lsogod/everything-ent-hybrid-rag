@@ -108,11 +108,49 @@ const EVAL_DOC_LIBRARY = DURETRIEVAL_DOCS;
 const DEFAULT_DOC = DEMO_DOC_LIBRARY[0];
 const DEFAULT_QUESTION = DEFAULT_DOC.examples[0];
 
+function buildUploadExamples(fileName) {
+  const rawName = String(fileName || '文档').trim();
+  const title = rawName.replace(/\.[^.]+$/, '') || '文档';
+  const lower = rawName.toLowerCase();
+
+  if (lower.includes('readme')) {
+    return [
+      `请概括《${title}》的目标、核心能力和适用场景`,
+      `《${title}》里描述了哪些关键模块与架构流程`,
+      `如果要快速上手《${title}》，需要先做哪几步`,
+    ];
+  }
+
+  if (/\.(yaml|yml|toml|ini|env|json|conf|cfg)$/i.test(lower)) {
+    return [
+      `请说明《${title}》中的关键配置项及其作用`,
+      `《${title}》里哪些配置最容易导致运行问题`,
+      `请给出《${title}》的最小可用配置示例`,
+    ];
+  }
+
+  if (/\.(py|js|ts|tsx|java|go|rs|cpp|c|h|hpp|sh|sql)$/i.test(lower)) {
+    return [
+      `请解释《${title}》的核心功能与主流程`,
+      `《${title}》里有哪些关键函数或类，它们分别负责什么`,
+      `请指出《${title}》中可能的风险点与改进建议`,
+    ];
+  }
+
+  return [
+    `请总结《${title}》的核心内容`,
+    `《${title}》提到了哪些关键术语和要点`,
+    `基于《${title}》，可以直接执行的下一步有哪些`,
+  ];
+}
+
 function createConversationId() {
   return `chat-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
-function createSteps(query, filePath, docTitle) {
+function createSteps(query, filePath, docTitle, retrievalScope = null) {
+  const scopeMode = retrievalScope?.mode || 'all';
+  const scopeFilePaths = Array.isArray(retrievalScope?.file_paths) ? retrievalScope.file_paths : [];
   return [
     {
       id: 'download',
@@ -178,6 +216,8 @@ function createSteps(query, filePath, docTitle) {
         method: 'POST(SSE)',
         query,
         debug: true,
+        scope_mode: scopeMode,
+        file_paths: scopeFilePaths,
       },
       output: null,
       error: '',
@@ -245,6 +285,21 @@ async function apiPost(baseUrl, path, body) {
   return res.json();
 }
 
+async function apiUploadFile(baseUrl, path, file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(resolveUrl(baseUrl, path), {
+    method: 'POST',
+    headers: buildHeaders(false),
+    body: formData,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST ${path} failed: ${res.status} ${text}`);
+  }
+  return res.json();
+}
+
 async function apiDelete(baseUrl, path, body) {
   const options = {
     method: 'DELETE',
@@ -304,6 +359,151 @@ function formatDateTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
   return date.toLocaleString();
+}
+
+function sameStringArray(left, right) {
+  if (left === right) return true;
+  if (!Array.isArray(left) || !Array.isArray(right)) return false;
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function normalizeScopeSelection(selectedIds, docs) {
+  const list = Array.isArray(docs) ? docs : [];
+  if (!list.length) return [];
+  const validIds = new Set(list.map((item) => item.id));
+  const picked = [];
+  const seen = new Set();
+  for (const raw of selectedIds || []) {
+    const id = String(raw || '').trim();
+    if (!id || !validIds.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    picked.push(id);
+  }
+  return picked;
+}
+
+function resolveScopeSelection(customIds, docs) {
+  const list = docs || [];
+  const selectedIds = normalizeScopeSelection(customIds, list);
+  if (!list.length || !selectedIds.length) {
+    return { mode: 'all', selectedIds: [], filePaths: [], fileCount: list.length };
+  }
+  const selectedSet = new Set(selectedIds);
+  const filePaths = list
+    .filter((item) => selectedSet.has(item.id))
+    .map((item) => String(item.filePath || '').trim())
+    .filter((value, idx, arr) => value && arr.indexOf(value) === idx);
+
+  return {
+    mode: 'filtered',
+    selectedIds,
+    filePaths,
+    fileCount: selectedIds.length,
+  };
+}
+
+function describeScope(resolved, docs) {
+  const total = (docs || []).length;
+  if (!total) return '暂无可选文档';
+  if (resolved.mode === 'all') return `全部（${total}/${total}）`;
+  return `自定义（${resolved.fileCount}/${total}）`;
+}
+
+function RetrievalScopeSelector({
+  docs,
+  customIds,
+  onCustomIdsChange,
+  disabled = false,
+}) {
+  const [keyword, setKeyword] = useState('');
+  const resolved = useMemo(
+    () => resolveScopeSelection(customIds, docs),
+    [customIds, docs],
+  );
+  const selectedSet = useMemo(() => new Set(resolved.selectedIds), [resolved.selectedIds]);
+  const filteredDocs = useMemo(() => {
+    const q = keyword.trim().toLowerCase();
+    if (!q) return docs || [];
+    return (docs || []).filter((item) => {
+      const title = String(item.title || '').toLowerCase();
+      const path = String(item.filePath || '').toLowerCase();
+      return title.includes(q) || path.includes(q);
+    });
+  }, [docs, keyword]);
+  const selectedDocs = useMemo(
+    () => (docs || []).filter((item) => selectedSet.has(item.id)),
+    [docs, selectedSet],
+  );
+
+  function toggleCustomDoc(docId) {
+    if (disabled) return;
+    const normalized = normalizeScopeSelection(customIds, docs);
+    const next = normalized.includes(docId)
+      ? normalized.filter((item) => item !== docId)
+      : [...normalized, docId];
+    onCustomIdsChange(next);
+  }
+
+  return (
+    <section className="scope-picker">
+      <div className="scope-custom-tools">
+        <input
+          value={keyword}
+          onChange={(event) => setKeyword(event.target.value)}
+          placeholder="搜索文档标题或路径"
+          disabled={disabled}
+        />
+        <div className="scope-inline-actions">
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => onCustomIdsChange((docs || []).map((item) => item.id))}
+            disabled={disabled || !(docs || []).length}
+          >
+            全选
+          </button>
+          <button type="button" className="ghost" onClick={() => onCustomIdsChange([])} disabled={disabled}>
+            清空
+          </button>
+        </div>
+      </div>
+      <div className="scope-doc-list">
+        {!filteredDocs.length && <p className="muted">没有匹配到文档</p>}
+        {filteredDocs.map((doc) => {
+          const checked = selectedSet.has(doc.id);
+          return (
+            <label key={`scope-${doc.id}`} className={`scope-doc-item ${checked ? 'is-checked' : ''}`}>
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={disabled}
+                onChange={() => toggleCustomDoc(doc.id)}
+              />
+              <div className="scope-doc-meta">
+                <span>{doc.title}</span>
+                <small title={doc.filePath}>{doc.filePath}</small>
+              </div>
+            </label>
+          );
+        })}
+      </div>
+      <div className="scope-selected-preview">
+        {!selectedDocs.length && <span>当前为全部文档检索</span>}
+        {!!selectedDocs.length && (
+          <>
+            {selectedDocs.slice(0, 6).map((item) => (
+              <span key={`scope-selected-${item.id}`}>{item.title}</span>
+            ))}
+            {selectedDocs.length > 6 && <span>等 {selectedDocs.length} 个文档</span>}
+          </>
+        )}
+      </div>
+    </section>
+  );
 }
 
 function reportTimestamp(item) {
@@ -860,15 +1060,19 @@ export default function App() {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   });
   const [evalDocs, setEvalDocs] = useState(EVAL_DOC_LIBRARY);
+  const [userDocs, setUserDocs] = useState([]);
   const visibleDocs = useMemo(
-    () => (activePage === 'eval' ? evalDocs : DEMO_DOC_LIBRARY),
-    [activePage, evalDocs],
+    () => (activePage === 'eval' ? evalDocs : [...userDocs, ...DEMO_DOC_LIBRARY]),
+    [activePage, evalDocs, userDocs],
   );
+  const chatScopeDocs = useMemo(() => [...userDocs, ...DEMO_DOC_LIBRARY], [userDocs]);
   const [selectedDocId, setSelectedDocId] = useState(DEFAULT_DOC.id);
   const selectedDoc = useMemo(
     () => visibleDocs.find((item) => item.id === selectedDocId) || visibleDocs[0] || DEFAULT_DOC,
     [visibleDocs, selectedDocId],
   );
+  const [chatScopeCustomIds, setChatScopeCustomIds] = useState([]);
+  const [demoScopeCustomIds, setDemoScopeCustomIds] = useState([]);
   const [question, setQuestion] = useState(DEFAULT_QUESTION);
   const [docPath, setDocPath] = useState(DEFAULT_DOC.filePath);
   const [steps, setSteps] = useState(() => createSteps(DEFAULT_QUESTION, DEFAULT_DOC.filePath, DEFAULT_DOC.title));
@@ -887,6 +1091,7 @@ export default function App() {
   const [evalReports, setEvalReports] = useState([]);
   const [latestEvalReport, setLatestEvalReport] = useState(null);
   const [deletePath, setDeletePath] = useState(DEFAULT_DOC.filePath);
+  const [deleteSourceFile, setDeleteSourceFile] = useState(true);
   const [myPermissions, setMyPermissions] = useState([]);
   const [permissionUserId, setPermissionUserId] = useState(DEFAULT_USER_ID);
   const [permissionLookup, setPermissionLookup] = useState([]);
@@ -916,8 +1121,42 @@ export default function App() {
   const [chatTrace, setChatTrace] = useState(null);
   const [chatLlmInput, setChatLlmInput] = useState(null);
   const [chatCitations, setChatCitations] = useState([]);
+  const [pendingUploadFile, setPendingUploadFile] = useState(null);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [uploadInputKey, setUploadInputKey] = useState(0);
 
   const apiBase = useMemo(() => import.meta.env.VITE_API_BASE_URL || '', []);
+  const normalizedChatCustomIds = useMemo(
+    () => normalizeScopeSelection(chatScopeCustomIds, chatScopeDocs),
+    [chatScopeCustomIds, chatScopeDocs],
+  );
+  const normalizedDemoCustomIds = useMemo(
+    () => normalizeScopeSelection(demoScopeCustomIds, visibleDocs),
+    [demoScopeCustomIds, visibleDocs],
+  );
+  const chatScopeResolved = useMemo(
+    () => resolveScopeSelection(normalizedChatCustomIds, chatScopeDocs),
+    [normalizedChatCustomIds, chatScopeDocs],
+  );
+  const demoScopeResolved = useMemo(
+    () => resolveScopeSelection(normalizedDemoCustomIds, visibleDocs),
+    [normalizedDemoCustomIds, visibleDocs],
+  );
+  const chatScopeFilePaths = chatScopeResolved.filePaths;
+  const demoScopeFilePaths = demoScopeResolved.filePaths;
+  const chatScopeLabel = useMemo(
+    () => describeScope(chatScopeResolved, chatScopeDocs),
+    [chatScopeResolved, chatScopeDocs],
+  );
+  const chatSelectedDocs = useMemo(() => {
+    if (!chatScopeResolved.selectedIds.length) return [];
+    const selected = new Set(chatScopeResolved.selectedIds);
+    return chatScopeDocs.filter((item) => selected.has(item.id));
+  }, [chatScopeResolved.selectedIds, chatScopeDocs]);
+  const demoScopeLabel = useMemo(
+    () => describeScope(demoScopeResolved, visibleDocs),
+    [demoScopeResolved, visibleDocs],
+  );
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -926,6 +1165,7 @@ export default function App() {
 
   useEffect(() => {
     refreshStatus();
+    refreshUploadedDocs();
     refreshEvalDatasets();
     refreshEvalReports();
     refreshMyPermissions();
@@ -954,13 +1194,50 @@ export default function App() {
   useEffect(() => {
     setDocPath(selectedDoc.filePath);
     setQuestion(selectedDoc.examples[0] || DEFAULT_QUESTION);
-    setSteps(createSteps(selectedDoc.examples[0] || DEFAULT_QUESTION, selectedDoc.filePath, selectedDoc.title));
-    setDeletePath(selectedDoc.filePath);
+    setSteps(
+      createSteps(selectedDoc.examples[0] || DEFAULT_QUESTION, selectedDoc.filePath, selectedDoc.title, {
+        mode: demoScopeResolved.mode,
+        file_paths: demoScopeFilePaths,
+      }),
+    );
+    if (selectedDoc.filePath.includes('/uploads/')) {
+      setDeletePath(selectedDoc.filePath);
+    }
     setLlmInput(null);
     setActiveChunk(null);
     refreshStatus(selectedDoc.filePath);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDoc]);
+
+  useEffect(() => {
+    if (!sameStringArray(chatScopeCustomIds, normalizedChatCustomIds)) {
+      setChatScopeCustomIds(normalizedChatCustomIds);
+    }
+  }, [chatScopeCustomIds, normalizedChatCustomIds]);
+
+  useEffect(() => {
+    if (!sameStringArray(demoScopeCustomIds, normalizedDemoCustomIds)) {
+      setDemoScopeCustomIds(normalizedDemoCustomIds);
+    }
+  }, [demoScopeCustomIds, normalizedDemoCustomIds]);
+
+  useEffect(() => {
+    if (activePage === 'chat') return;
+    setSteps((prev) =>
+      prev.map((item) =>
+        item.id === 'retrieve'
+          ? {
+              ...item,
+              input: {
+                ...item.input,
+                scope_mode: demoScopeResolved.mode,
+                file_paths: demoScopeFilePaths,
+              },
+            }
+          : item,
+      ),
+    );
+  }, [activePage, demoScopeResolved.mode, demoScopeFilePaths]);
 
   useEffect(() => {
     const first = visibleDocs[0];
@@ -1011,6 +1288,65 @@ export default function App() {
       setChunkCount(statsData.chunk_count || 0);
     } catch {
       setHealth({ status: 'error' });
+    }
+  }
+
+  async function refreshUploadedDocs(preferredPath = '') {
+    try {
+      const payload = await apiGet(apiBase, '/api/v1/index/uploads');
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      const mapped = items.map((item) => ({
+        id: `upload_${encodeURIComponent(item.file_path || item.file_name || Math.random().toString(16).slice(2, 10))}`,
+        title: `已上传: ${item.file_name}`,
+        filePath: item.file_path,
+        prepare: 'local',
+        examples: buildUploadExamples(item.file_name),
+        chunkCount: item.chunk_count || 0,
+        indexed: Boolean(item.indexed),
+        sizeBytes: item.size_bytes || 0,
+        modifiedAt: item.modified_at || '',
+      }));
+      setUserDocs(mapped);
+
+      if (!mapped.length) {
+        setDeletePath('');
+        return mapped;
+      }
+
+      const preferred = String(preferredPath || '').trim();
+      if (preferred) {
+        const hit = mapped.find((item) => item.filePath === preferred);
+        if (hit) {
+          setSelectedDocId(hit.id);
+          setDeletePath(hit.filePath);
+        }
+      } else if (!mapped.some((item) => item.filePath === deletePath)) {
+        setDeletePath(mapped[0].filePath);
+      }
+      return mapped;
+    } catch {
+      return [];
+    }
+  }
+
+  async function uploadKnowledgeFile() {
+    if (!pendingUploadFile || uploadingFile || running) return;
+    setError('');
+    setNotice('');
+    setUploadingFile(true);
+    try {
+      const payload = await apiUploadFile(apiBase, '/api/v1/index/upload', pendingUploadFile);
+      setDocPath(payload.file_path);
+      setDeletePath(payload.file_path);
+      setPendingUploadFile(null);
+      setUploadInputKey((key) => key + 1);
+      setNotice(`上传成功并已提交索引任务：${payload.file_name}`);
+      await refreshUploadedDocs(payload.file_path);
+      await refreshStatus(payload.file_path);
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setUploadingFile(false);
     }
   }
 
@@ -1108,15 +1444,21 @@ export default function App() {
   async function deleteIndexedFile() {
     const targetPath = deletePath.trim();
     if (!targetPath) {
-      setAdminError('请输入需要删除索引的文件路径');
+      setAdminError('请选择需要删除的上传文档');
       return;
     }
-    const payload = await runAdminAction('删除索引', () =>
+    const payload = await runAdminAction(deleteSourceFile ? '删除索引并删除源文件' : '删除索引', () =>
       apiDelete(apiBase, '/api/v1/index/file', {
         file_path: targetPath,
+        delete_source: deleteSourceFile,
       }),
     );
     if (payload) {
+      if (deleteSourceFile) {
+        setUserDocs((prev) => prev.filter((item) => item.filePath !== targetPath));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await refreshUploadedDocs();
       await refreshStatus(targetPath);
       setChunkCount(0);
     }
@@ -1210,6 +1552,11 @@ export default function App() {
     setChatHint('已创建新会话，可以直接提问。');
   }
 
+  function removeChatScopeDoc(docId) {
+    const next = normalizeScopeSelection(chatScopeCustomIds, chatScopeDocs).filter((id) => id !== docId);
+    setChatScopeCustomIds(next);
+  }
+
   async function sendChatMessage() {
     const query = chatInput.trim();
     if (!query || chatStreaming) return;
@@ -1252,6 +1599,7 @@ export default function App() {
         conversation_id: conversationId,
         user_id: DEFAULT_USER_ID,
         debug: chatDebugMode,
+        file_paths: chatScopeFilePaths.length ? chatScopeFilePaths : null,
       };
 
       const res = await fetch(resolveUrl(apiBase, '/api/v1/qa/ask'), {
@@ -1339,7 +1687,7 @@ export default function App() {
     }
   }
 
-  async function askWithTrace(queryText) {
+  async function askWithTrace(queryText, scopedFilePaths = []) {
     setAnswer('');
     setRetrieval(null);
     setLlmInput(null);
@@ -1350,6 +1698,7 @@ export default function App() {
       conversation_id: null,
       user_id: DEFAULT_USER_ID,
       debug: true,
+      file_paths: scopedFilePaths.length ? scopedFilePaths : null,
     };
 
     const res = await fetch(resolveUrl(apiBase, '/api/v1/qa/ask'), {
@@ -1449,7 +1798,12 @@ export default function App() {
     setRetrieval(null);
     setLlmInput(null);
     setActiveChunk(null);
-    setSteps(createSteps(queryText, activeDoc.filePath, activeDoc.title));
+    setSteps(
+      createSteps(queryText, activeDoc.filePath, activeDoc.title, {
+        mode: demoScopeResolved.mode,
+        file_paths: demoScopeFilePaths,
+      }),
+    );
 
     try {
       const sampleResult = await executeStep('download', async () => {
@@ -1473,6 +1827,16 @@ export default function App() {
               input: {
                 ...item.input,
                 file_path: targetPath,
+              },
+            };
+          }
+          if (item.id === 'retrieve') {
+            return {
+              ...item,
+              input: {
+                ...item.input,
+                scope_mode: demoScopeResolved.mode,
+                file_paths: demoScopeFilePaths,
               },
             };
           }
@@ -1532,7 +1896,7 @@ export default function App() {
 
       setChunkCount(pollResult.chunk_count || 0);
 
-      const retrievalOutput = await executeStep('retrieve', () => askWithTrace(queryText));
+      const retrievalOutput = await executeStep('retrieve', () => askWithTrace(queryText, demoScopeFilePaths));
 
       await executeStep('answer', async () => ({
         preview: retrievalOutput.answer_text.slice(0, 240),
@@ -1711,6 +2075,15 @@ export default function App() {
                 {chatDebugMode ? '关闭开发者模式' : '开启开发者模式'}
               </button>
             </div>
+            <section className="scope-panel">
+              <p className="muted">检索范围：{chatScopeLabel}</p>
+              <RetrievalScopeSelector
+                docs={chatScopeDocs}
+                customIds={chatScopeCustomIds}
+                onCustomIdsChange={setChatScopeCustomIds}
+                disabled={chatStreaming}
+              />
+            </section>
 
             <div className="chat-stream">
               {!chatMessages.length && <p className="muted">输入问题后即可开始对话，答案会流式返回。</p>}
@@ -1729,8 +2102,17 @@ export default function App() {
                       {!!item.citations?.length && (
                         <div className="chat-citations">
                           {item.citations.slice(0, 5).map((citation, idx) => (
-                            <span key={`${item.id}-citation-${idx}`}>
+                            <span
+                              key={`${item.id}-citation-${idx}`}
+                              className="citation-chip"
+                              tabIndex={0}
+                              aria-label={`引用 ${idx + 1}`}
+                            >
                               [{idx + 1}] {citation.file_name || citation.file_path || '-'}
+                              <span className="citation-tooltip">
+                                {String(citation.chunk_content || citation.chunk_preview || '').trim() ||
+                                  '该引用来自历史记录，暂无可展示的 chunk 文本。'}
+                              </span>
                             </span>
                           ))}
                         </div>
@@ -1742,21 +2124,72 @@ export default function App() {
 
             <section className="chat-compose">
               <div className="chat-compose-bar">
-                <textarea
-                  value={chatInput}
-                  onChange={(event) => setChatInput(event.target.value)}
-                  placeholder="给知识库助手发送消息（Enter 发送，Shift+Enter 换行）"
-                  rows={2}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' && !event.shiftKey) {
-                      event.preventDefault();
-                      sendChatMessage();
-                    }
-                  }}
-                />
-                <button type="button" className="send-icon-btn" onClick={sendChatMessage} disabled={chatStreaming || !chatInput.trim()}>
-                  {chatStreaming ? '回答中' : '发送'}
-                </button>
+                <div className="chat-compose-scope">
+                  <div className="chat-compose-scope-head">
+                    <span>检索文档</span>
+                    {chatScopeResolved.mode === 'filtered' && (
+                      <button
+                        type="button"
+                        className="ghost compose-scope-clear-btn"
+                        onClick={() => setChatScopeCustomIds([])}
+                        disabled={chatStreaming}
+                      >
+                        清空
+                      </button>
+                    )}
+                  </div>
+                  <div className="chat-compose-scope-list">
+                    {chatScopeResolved.mode === 'all' && (
+                      <span className="compose-scope-pill is-all">全库检索（{chatScopeDocs.length} 个文档）</span>
+                    )}
+                    {chatScopeResolved.mode === 'filtered' &&
+                      chatSelectedDocs.slice(0, 8).map((doc) => (
+                        <span key={`compose-doc-${doc.id}`} className="compose-scope-pill" title={doc.filePath}>
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path
+                              d="M6.5 3.75a1.75 1.75 0 0 0-1.75 1.75v13a1.75 1.75 0 0 0 1.75 1.75h11a1.75 1.75 0 0 0 1.75-1.75V9.56a1.75 1.75 0 0 0-.5-1.24l-3.06-3.07a1.75 1.75 0 0 0-1.24-.5H6.5Zm8 .5v3.25A1.5 1.5 0 0 0 16 9h3.25v9.5a.75.75 0 0 1-.75.75h-11a.75.75 0 0 1-.75-.75v-13a.75.75 0 0 1 .75-.75h7Z"
+                              fill="currentColor"
+                            />
+                          </svg>
+                          <span>{doc.title}</span>
+                          <button
+                            type="button"
+                            className="compose-scope-pill-remove"
+                            onClick={() => removeChatScopeDoc(doc.id)}
+                            aria-label={`移除 ${doc.title}`}
+                            disabled={chatStreaming}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    {chatScopeResolved.mode === 'filtered' && chatSelectedDocs.length > 8 && (
+                      <span className="compose-scope-pill is-overflow">+{chatSelectedDocs.length - 8}</span>
+                    )}
+                  </div>
+                </div>
+                <div className="chat-compose-input-row">
+                  <textarea
+                    value={chatInput}
+                    onChange={(event) => setChatInput(event.target.value)}
+                    placeholder="给知识库助手发送消息（Enter 发送，Shift+Enter 换行）"
+                    rows={2}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !event.shiftKey) {
+                        event.preventDefault();
+                        sendChatMessage();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="send-icon-btn"
+                    onClick={sendChatMessage}
+                    disabled={chatStreaming || !chatInput.trim()}
+                  >
+                    {chatStreaming ? '回答中' : '发送'}
+                  </button>
+                </div>
               </div>
               <p className="muted chat-compose-tip">仅基于检索到的文档回答，并附带引用来源。</p>
             </section>
@@ -1772,6 +2205,7 @@ export default function App() {
                   <>
                     <div className="metric-row">
                       <span>context: {chatCitations.length}</span>
+                      <span>scope: {chatTrace.scope?.mode || 'all'} ({chatTrace.scope?.file_count ?? 0})</span>
                       <span>keyword: {chatTrace.keyword?.count ?? 0}</span>
                       <span>vector: {chatTrace.vector?.count ?? 0}</span>
                       <span>fusion: {chatTrace.fusion?.count ?? 0}</span>
@@ -1807,6 +2241,38 @@ export default function App() {
         <>
 
       <section className="actions">
+        {activePage === 'demo' && (
+          <>
+            <div className="upload-row">
+              <label className="upload-file-label">
+                上传文档（自动保存并提交索引）
+                <input
+                  key={uploadInputKey}
+                  type="file"
+                  accept=".pdf,.docx,.md,.txt,.py,.java,.js,.ts,.go,.sql,.json,.yaml,.yml,.ini,.toml,.sh"
+                  onChange={(event) => setPendingUploadFile(event.target.files?.[0] || null)}
+                  disabled={running || uploadingFile}
+                />
+              </label>
+              <button
+                type="button"
+                className="ghost"
+                onClick={uploadKnowledgeFile}
+                disabled={running || uploadingFile || !pendingUploadFile}
+              >
+                {uploadingFile ? '上传中...' : '上传并索引'}
+              </button>
+            </div>
+            {pendingUploadFile && (
+              <p className="muted">
+                待上传：{pendingUploadFile.name}（{Math.ceil(pendingUploadFile.size / 1024)} KB）
+              </p>
+            )}
+            <p className="muted">
+              上传文件会持久化保存在 <code>/data/knowledge/uploads</code>，索引持久化保存在 ES 数据卷。
+            </p>
+          </>
+        )}
         <label>
           {activePage === 'demo' ? '选择测试文档' : '选择评测数据集'}
           <select value={selectedDocId} onChange={(event) => setSelectedDocId(event.target.value)}>
@@ -1817,6 +2283,15 @@ export default function App() {
             ))}
           </select>
         </label>
+        <section className="scope-panel">
+          <p className="muted">检索范围：{demoScopeLabel}</p>
+          <RetrievalScopeSelector
+            docs={visibleDocs}
+            customIds={demoScopeCustomIds}
+            onCustomIdsChange={setDemoScopeCustomIds}
+            disabled={running}
+          />
+        </section>
         <div className="chip-list">
           {selectedDoc.examples.map((item) => (
             <button key={item} type="button" className="chip" onClick={() => setQuestion(item)}>
@@ -1905,17 +2380,31 @@ export default function App() {
 
           <section className="trace-block">
             <h4>索引删除</h4>
-            <label>
-              file_path
+            {!userDocs.length && <p className="muted">暂无上传文档。上传后即可在这里删除。</p>}
+            {!!userDocs.length && (
+              <label>
+                已上传文档
+                <select value={deletePath} onChange={(event) => setDeletePath(event.target.value)}>
+                  <option value="">请选择要删除的文档</option>
+                  {userDocs.map((item) => (
+                    <option key={`delete-${item.id}`} value={item.filePath}>
+                      {item.title}（chunk: {item.chunkCount ?? 0}）
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <label className="inline-check">
               <input
-                value={deletePath}
-                onChange={(event) => setDeletePath(event.target.value)}
-                placeholder="/data/knowledge/example.md"
+                type="checkbox"
+                checked={deleteSourceFile}
+                onChange={(event) => setDeleteSourceFile(event.target.checked)}
               />
+              同时删除源文件（仅对 /data/knowledge/uploads 生效）
             </label>
             <div className="action-row">
-              <button type="button" className="ghost" onClick={deleteIndexedFile} disabled={running}>
-                删除该文件索引
+              <button type="button" className="ghost" onClick={deleteIndexedFile} disabled={running || !deletePath.trim()}>
+                {deleteSourceFile ? '删除索引并删除源文件' : '仅删除索引'}
               </button>
             </div>
           </section>
@@ -2209,6 +2698,7 @@ export default function App() {
           <>
             <div className="metric-row">
               <span>context: {retrieval.contextCount}</span>
+              <span>scope: {retrieval.trace.scope?.mode || 'all'} ({retrieval.trace.scope?.file_count ?? 0})</span>
               <span>keyword: {retrieval.trace.keyword?.count ?? 0}</span>
               <span>vector: {retrieval.trace.vector?.count ?? 0}</span>
               <span>fusion: {retrieval.trace.fusion?.count ?? 0}</span>

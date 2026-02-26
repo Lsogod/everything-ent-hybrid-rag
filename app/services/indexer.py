@@ -80,18 +80,41 @@ class IndexerService:
             indexed_count += flush(chunk_batch, current_start)
         return {"status": "ok", "chunks": indexed_count, "file_path": str(source)}
 
-    def delete_file(self, file_path: str) -> dict:
+    def delete_file(self, file_path: str, delete_source: bool = False) -> dict:
         source = Path(file_path).resolve()
         if not self._is_path_allowed(source):
             return {"status": "skipped", "reason": "path_not_allowed", "file_path": str(source)}
         self.store.delete_by_file(str(source))
-        return {"status": "ok", "deleted": str(source)}
+        deleted_source = False
+        delete_reason = "index_only"
+        if delete_source:
+            deleted_source, delete_reason = self._delete_source_file(source)
+        return {
+            "status": "ok",
+            "deleted": str(source),
+            "source_deleted": deleted_source,
+            "source_delete_reason": delete_reason,
+        }
 
     def _is_path_allowed(self, path: Path) -> bool:
         if self.settings.allow_external_paths:
             return True
         root = Path(self.settings.knowledge_root).resolve()
         return path.is_relative_to(root)
+
+    def _delete_source_file(self, source: Path) -> tuple[bool, str]:
+        upload_root = Path(self.settings.knowledge_root).resolve() / "uploads"
+        if not source.is_relative_to(upload_root):
+            return False, "source_delete_not_allowed"
+        if not source.exists():
+            return False, "source_file_not_found"
+        if not source.is_file():
+            return False, "source_not_file"
+        try:
+            source.unlink()
+            return True, "source_file_deleted"
+        except OSError:
+            return False, "source_delete_failed"
 
     @staticmethod
     def _iter_chunks(text: str, chunk_size: int, overlap: int) -> Iterator[str]:
